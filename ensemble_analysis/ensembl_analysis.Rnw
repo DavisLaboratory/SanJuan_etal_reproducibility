@@ -1,0 +1,335 @@
+\documentclass{article}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\section{Sample description}
+\begin{small}
+<<>>=
+options(width=120)
+library(edgeR)
+library(limma)
+library(RUVSeq)
+library(gplots)
+library(ggplot2)
+library(VennDiagram)
+
+path <- "/stornext/General/data/academic/lab_davis/christine_data"
+
+sample_annot <- read.csv(paste0(path,"/sample_table.csv"))
+
+sample_annot <- sample_annot[,-c(5:7,10)]
+
+sample_annot
+@
+\end{small}
+
+
+<<>>=
+load(paste0(path,"/counts_fr.RData"))
+y <- DGEList(counts = counts_fr$counts, genes = counts_fr$annotation)
+
+annot.path <- "/stornext/General/data/academic/lab_davis/genomes/DATA"
+
+annot <- read.delim(paste0(annot.path,"/Homo_sapiens.gene_info"), header = FALSE, skip = 1)[,-1]
+colnames(annot) <- c("GeneID", "Symbol", "LocusTag", "Synonyms", 
+                     "dbXrefs","Chromosome", "map_location","description",
+                     "type_of_gene","Symbol_from_nomenclature_authority",
+                     "Full_name_from_nomanclature_authority", 
+                     "Numenclature_status","Other_destignations","Modification_date")
+
+
+idx <- match(rownames(y), annot$GeneID)
+
+y <- y[which(!is.na(idx)),]
+
+
+
+idx <- idx[!is.na(idx)]
+
+gene_lengths <- y$genes$Length
+
+y$genes <- annot[idx,]
+y$genes$Length <- gene_lengths
+@
+
+In the following section we remove genes with no annotation, or genes with counts per million (cpm) less than 0.5 in less than 3 samples.
+
+<<>>=
+sample_annot$Sample <- gsub("170223_BSF--","",sample_annot$Sample)
+samplenames <- gsub("BAM_files.CB00GANXX_[12]_170223_BSF\\.\\.([[:digit:]]+)_Human.*","\\1",colnames(y))
+
+col.idx <- match(sample_annot$Sample, samplenames)
+
+y <- y[,col.idx]
+colnames(y) <- sample_annot$cell
+
+TIC_nonTic <- as.factor(ifelse(grepl("TICs",sample_annot$cond),"TIC","nonTIC"))
+
+
+y$samples$group <- as.factor(paste(gsub("\\.[123]","", rownames(y$samples)), TIC_nonTic,sep="_"))
+
+y$samples$group <- gsub("lo","Lo", y$samples$group)
+
+keep <- rowSums(cpm(y) > 0.5) >= 3
+table(keep)
+
+
+y <- y[keep,, keep.lib.sizes = FALSE]
+dim(y)
+
+y <- calcNormFactors(y)
+y$samples
+@
+
+
+\section{Nearest shrunken neighbours method}
+<<>>=
+# nearest shrunken neighbours method
+library(pamr)
+logCPM <- cpm(y, log=TRUE, prior.count = 2)
+
+
+# logCPM.batchadjust <- pamr.batchadjust(list(x=logCPM,
+#                                           y=fit$classification,
+#                                           batchlabels=batch,
+#                                           geneid=as.character(rownames(logCPM))))
+
+group <- gsub(".*_(TIC|nonTIC)","\\1",y$samples$group)
+group[grep("MCF7|ZR75", y$samples$group)] <- "luminal"
+
+group <- as.factor(group)
+
+data.train <- pamr.train(data= list(x=logCPM,
+                                          y=group,
+                                          geneid=as.character(rownames(logCPM))))
+data.train
+data.cv <- pamr.cv(data.train, data=list(x=logCPM,
+                                          y=group,
+                                          geneid=as.character(rownames(logCPM))), nfold = 5)
+@
+
+<<include=TRUE, fig=TRUE>>=
+pamr.plotcv(data.cv)
+@
+
+<<>>=
+#pamr.geneplot(data.train, data = logCPM) # can only plot 20-25 genes
+survived.genes <- pamr.listgenes(fit = data.train, 
+                                 data = list(x=logCPM,
+                                          y=group,
+                                          geneid=as.character(rownames(logCPM))),
+                                 threshold = 2.744)
+
+
+survived.genes <- apply(survived.genes, 2, as.numeric)
+
+# colLabels <- c("liver_ILC1","liver_NK", "tumor_NK",
+#                                    "tumor_intILC1", "tumor_ILC1")
+
+#colLabels <- paste(colnames(survived.genes)[-1], c("ILC1","NK"), sep="_")
+
+pam.annot <- y$genes[,-c(3:7,10:15)]
+
+
+# library(pheatmap)
+# library(RColorBrewer)
+# pheatmap(survived.genes[,-1], cluster_cols = FALSE,
+#          color=gplots::colorpanel(256, 
+#             "blue", "white", "red"), cellwidth = 100,
+#          labels_row = pam.annot$Symbol[match(survived.genes[,1],pam.annot$GeneID)],
+#          labels_col = colLabels, fontsize_row = 5,
+#          fontsize_col = 6)
+
+
+
+survived.genes <- cbind(survived.genes, pam.annot[match(survived.genes[,1],
+                                                        pam.annot$GeneID),])
+
+
+survived.genes[grep("^AR$|ZEB|PPARG|GATA|POUF", survived.genes$Symbol),]
+
+# what are the transcription factors
+library(biomaRt)
+
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+TF_mapping <-  getBM(attributes = c('entrezgene'), 
+      filters = 'go', 
+      values = 'GO:0003700', 
+      mart = ensembl)
+
+
+survived.genes$isTF <- ifelse(survived.genes$id %in% TF_mapping$entrezgene,1 ,0)
+
+
+survived.genes[survived.genes$isTF==1,]
+survived.genes[grep("FOX", survived.genes$Symbol),]
+survived.genes[grep("SP1", survived.genes$Symbol),]
+@
+
+\section{CCA analysis}
+<<>>=
+# overlap with CC1 genes
+CPM_HMLER <- cpm(y[,grep("HMLER_CD44Hi_TIC|HMLER_CD44Lo_nonTI", y$samples$group)],
+                    log=TRUE, prior.count = 2)
+
+CPM_HCC38 <- cpm(y[,grep("HCC38_CD44Hi_TIC|HCC38_CD44Lo_nonTI", y$samples$group)],
+                    log=TRUE, prior.count = 2)
+
+
+library(PMA)
+
+
+load("peerm.out.RData")
+out <- CCA(
+  x = t(CPM_HMLER),
+  z = t(CPM_HCC38),
+  typex = "standard", typez = "standard", 
+   K=3, 
+  penaltyx= 0.7, v=peerm.out$v.init, penaltyz= 0.7,
+  outcome=  "multiclass", y = as.numeric(as.factor(c("nonTIC","nonTIC","nonTIC","TIC","TIC","TIC")))
+  )
+                                         
+                                         
+                                         
+str(out)
+
+
+
+
+sum(out$u[,1] != 0)
+sum(out$v[,1] != 0)
+
+
+sum(out$u[,2] != 0)
+sum(out$v[,2] != 0)
+
+
+sum(out$u[,3] != 0)
+sum(out$v[,3] != 0)
+
+annot <- y$genes[,-c(3:7, 10:16)]
+
+CC1_hmler <- cbind(annot[out$u[,1] != 0 | out$v[,1] != 0 ,], factor = (out$u[,1] * out$v[,1])[out$u[,1] != 0 | out$v[,1] != 0])
+CC1_hmler <- CC1_hmler[order(abs(CC1_hmler$factor), decreasing = TRUE),]
+
+dim(CC1_hmler)
+
+
+CC1_HMLER <- cbind(annot[out$u[,1] != 0 ,], factor = out$u[,1][out$u[,1] != 0])
+CC1_HMLER$Rank <- rank(-abs(CC1_HMLER$factor), ties.method = "average")
+CC1_HMLER <- CC1_HMLER[order(abs(CC1_HMLER$factor), decreasing = TRUE),]
+CC1_HMLER$Direction <- sign(CC1_HMLER$factor)
+
+
+CC1_HCC38 <- cbind(annot[out$v[,1] != 0, ], factor= out$v[,1][out$v[,1] != 0])
+CC1_HCC38$Rank <- rank(-abs(CC1_HCC38$factor), ties.method = "average")
+CC1_HCC38 <- CC1_HCC38[order(abs(CC1_HCC38$factor), decreasing = TRUE),]
+CC1_HCC38$Direction <- sign(CC1_HCC38$factor)
+
+CC1_basals <- cbind(annot[out$u[,1] != 0 | out$v[,1] != 0 ,], 
+                   AveRankBD = rowMeans(cbind(rank(-abs(out$u[,1]), ties.method = "average"),
+                                            rank(-abs(out$v[,1]), ties.method = "average")))[out$u[,1] != 0 | out$v[,1] != 0],
+                   CBD = (sign(out$u[,1]) * sign(out$v[,1]))[out$u[,1] != 0 | out$v[,1] != 0],
+                   Direction_DB1 = sign(out$u[,1])[out$u[,1] != 0 | out$v[,1] != 0],
+                   Direction_DB2 = sign(out$v[,1])[out$u[,1] != 0 | out$v[,1] != 0])
+
+
+CC1_basals <- CC1_basals[order(CC1_basals$AveRankBD),]
+
+library(VennDiagram)
+
+# overlap of targets among DE genes only
+vd <- venn.diagram(list(CCA= CC1_basals$GeneID,
+                  pamr = survived.genes$id),
+             fill = 1:2, alpha = 0.3, filename = NULL)
+
+
+print(grid.draw(vd))
+
+
+
+@
+\includepdf[fitpaper=true, pages=-]{}
+
+
+\section{Differential Expression}
+<<>>=
+y_basal <- calcNormFactors(y[,grep("(HMLER|HCC38)_CD44Hi_TIC|(HMLER|HCC38)_CD44Lo_nonTI", y$samples$group)])
+
+Cellline <- as.factor(gsub("(.*)_([CD44|104].*)?[TIC|non].*","\\1",y_basal$samples$group))
+Cellline <- relevel(Cellline, ref="HCC38")
+
+
+marker <- gsub("(.*)_([CD44|104].*)(_[TIC|non].*)","\\2",y_basal$samples$group)
+marker <- gsub("CD44Hi","CD44Hi.104x", marker)
+marker <- as.factor(marker)
+marker <- relevel(marker, ref="CD44Lo")
+
+
+design <- model.matrix(~ marker)
+
+design
+
+
+
+corfit <- duplicateCorrelation(cpm(y_basal, prior.count = 2, log=TRUE), 
+                               block = Cellline, design = design)
+
+
+v <- voom(y_basal, design = design,
+          block=Cellline, correlation=corfit$consensus.correlation)
+
+fit <- lmFit(v, design = design, block = Cellline, correlation = corfit$consensus.correlation)
+fit <- eBayes(fit)
+summary(decideTests(fit))
+
+res_tbl_unsorted <- topTable(fit, coef = 2, n = Inf, sort.by = "none")
+res_tbl_unsorted$isDE <- ifelse(res_tbl_unsorted$adj.P.Val < 0.05,1 , 0)
+
+
+
+res_tbl_sorted <- topTable(fit, coef = 2, n = Inf)
+res_tbl_sorted$isDE <- ifelse(res_tbl_sorted$adj.P.Val < 0.05,1 , 0)
+
+res_tbl_sorted <- res_tbl_sorted[,c("GeneID","Symbol",
+                                    "type_of_gene","logFC",
+                                    "AveExpr","t","P.Value",
+                                    "adj.P.Val", "B","isDE"),]
+@
+
+\section{Motif Enrichment analysis using CENTRIMO}
+Locally enriched motifs in DE genes compared to a comparable set of least DE genes
+
+<<>>=
+centrimo <- read.table("MEME/CENTRIMO/centrimo.tsv", header = TRUE)
+
+# ensure all motif names are in CAPITAL letters, no (:) in the names
+enriched_motifs <- gsub("(.*)(\\(.*\\))","\\1", centrimo$motif_alt_id)
+enriched_motifs <- unlist(strsplit(enriched_motifs, split = "::"))
+enriched_motifs <- toupper(unique(enriched_motifs))
+@
+
+
+\section{Ensembl learning by majority vote}
+<<>>=
+# start from res_tbl_unsorted. this contains all the genes, an a column called isDE, which contains information of the very first learning method;
+# the differential expression
+
+res_tbl_unsorted$pamr <- ifelse(res_tbl_unsorted$GeneID %in% survived.genes$id, 1, 0)
+res_tbl_unsorted$CCA <- ifelse(res_tbl_unsorted$GeneID %in% CC1_basals$GeneID, 1, 0)
+res_tbl_unsorted$enrichedMotif <- ifelse(res_tbl_unsorted$Symbol %in% enriched_motifs, 1, 0)
+res_tbl_unsorted$isTF <- ifelse(res_tbl_unsorted$GeneID %in% TF_mapping$entrezgene, 1, 0)
+
+# discard unneccessary columns
+res_tbl_unsorted <- res_tbl_unsorted[,-c(3:7, 10:16)]
+
+# score genes by the frequency of detection by various learners
+res_tbl_unsorted$score <- rowSums(res_tbl_unsorted[,c("isDE","pamr","CCA","enrichedMotif","isTF")])
+
+ensembl_res <- res_tbl_unsorted[order(res_tbl_unsorted$score, res_tbl_unsorted$AveExpr, decreasing = TRUE),]
+
+
+@
+
+\end{document}

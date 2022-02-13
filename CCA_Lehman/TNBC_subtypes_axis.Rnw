@@ -1,0 +1,321 @@
+\documentclass{article}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+Read in the gene signatures from the TNBC 6 subtypes:
+<<>>=
+library(xlsx)
+
+TNBC <- list(6)
+
+for (i in 3:8){
+  doc <- as.data.frame(read.xlsx("TNBC_signatures.xls", i, startRow = 2))
+  TNBC[i-2] <- list(as.character(doc$GENE[doc[,3] < 0.05]))
+}
+
+
+names(TNBC) <- c("BL1","BL2","IM","M","MSL","LAR")
+@
+
+RNA-seq profiles: filter low expression and normalize. Calculate CPMs.
+<<>>=
+library(edgeR)
+library(limma)
+
+
+path <- "/stornext/General/data/academic/lab_davis/christine_data"
+
+sample_annot <- read.csv(paste0(path,"/sample_table.csv"))
+
+sample_annot <- sample_annot[,-c(5:7,10)]
+
+sample_annot
+
+load(paste0(path,"/counts_fr.RData"))
+y <- DGEList(counts = counts_fr$counts, genes = counts_fr$annotation)
+
+annot.path <- "/stornext/General/data/academic/lab_davis/genomes/DATA"
+
+annot <- read.delim(paste0(annot.path,"/Homo_sapiens.gene_info"), header = FALSE, skip = 1)[,-1]
+colnames(annot) <- c("GeneID", "Symbol", "LocusTag", "Synonyms", 
+                     "dbXrefs","Chromosome", "map_location","description",
+                     "type_of_gene","Symbol_from_nomenclature_authority",
+                     "Full_name_from_nomanclature_authority", 
+                     "Numenclature_status","Other_destignations","Modification_date")
+
+
+idx <- match(rownames(y), annot$GeneID)
+
+y <- y[which(!is.na(idx)),]
+
+
+
+idx <- idx[!is.na(idx)]
+
+gene_lengths <- y$genes$Length
+
+y$genes <- annot[idx,]
+y$genes$Length <- gene_lengths
+
+sample_annot$Sample <- gsub("170223_BSF--","",sample_annot$Sample)
+samplenames <- gsub("BAM_files.CB00GANXX_[12]_170223_BSF\\.\\.([[:digit:]]+)_Human.*","\\1",colnames(y))
+
+col.idx <- match(sample_annot$Sample, samplenames)
+
+y <- y[,col.idx]
+colnames(y) <- sample_annot$cell
+
+TIC_nonTic <- as.factor(ifelse(grepl("TICs",sample_annot$cond),"TIC","nonTIC"))
+
+
+y$samples$group <- as.factor(paste(gsub("\\.[123]","", rownames(y$samples)), TIC_nonTic,sep="_"))
+
+y$samples$group <- gsub("lo","Lo", y$samples$group)
+
+keep <- rowSums(cpm(y) > 0.5) >= 3
+table(keep)
+
+
+y <- y[keep,, keep.lib.sizes = FALSE]
+dim(y)
+
+y <- calcNormFactors(y)
+
+# remove MED populations
+y <- y[,grep("Med", colnames(y), invert = TRUE)]
+
+CPM <- cpm(y, log=TRUE, prior.count = 2)
+rownames(CPM) <- y$genes$Symbol
+@
+
+Prepare index matrix:
+<<>>=
+
+# remove the uninteresting 
+TNBC <- TNBC[grep("IM|MSL", names(TNBC), invert=TRUE)]
+names(TNBC)
+
+target_symbols <- unique(unlist(TNBC))
+length(target_symbols)
+sum(!target_symbols %in% rownames(CPM))
+
+
+# non-coding genes are returned as NA:
+target_symbols <- alias2SymbolTable(target_symbols)
+
+# update the symbols for all the genes in the gene-set list
+
+
+
+
+
+keep_idx <- unlist(ids2indices(target_symbols,rownames(CPM)))
+y2 <- CPM[keep_idx,]
+
+TNBC <- lapply(TNBC, alias2SymbolTable)
+
+INDX <- matrix(0, nrow = length(keep_idx), ncol= length(TNBC))
+tnbc_idx <- ids2indices(TNBC, rownames(y2))
+
+for (i in 1:length(tnbc_idx)){
+  INDX[tnbc_idx[[i]],i] <- 1
+}
+
+rownames(INDX) <- rownames(y2)
+colnames(INDX) <- names(TNBC)
+
+# A function that create an index matrix (binary matrix of gene-geneset relations)
+# from a list object. Assumes rownames are ids used for mapping.
+
+genesets2ids <- function(y, genesetlist){
+  target_symbols <- unique(unlist(genesetlist))
+  keep_idx <- unlist(limma::ids2indices(target_symbols,rownames(y)))
+  INDX <- matrix(0, nrow = length(keep_idx), ncol= length(genesetlist))
+  tnbc_idx <- limma::ids2indices(genesetlist, rownames(y[keep_idx,]))
+
+  for (i in 1:length(tnbc_idx)){
+     INDX[tnbc_idx[[i]],i] <- 1
+     }
+ 
+  INDX
+}
+@
+
+
+<<>>=
+library(PMA)
+
+dim(y2)==dim(INDX)
+
+# need to de-trend with respect to average expression in cell line (i.e. remove cell line effect)
+# y2 <- removeBatchEffect(cpm(y[match(rownames(y2), y$genes$Symbol),], prior.count = 2, log = TRUE),
+#                         batch = as.factor(gsub("(HMLER|MCF7|ZR75-1|HCC38)_(.*)","\\1", y$samples$group)))
+
+
+
+logCPM <- scale(y2 - rowMeans(y2))
+# logCPM <- y2 - rowMeans(y2)
+
+
+# CCA
+perm.out <- CCA.permute(x=logCPM, z=INDX, typex = "standard", typez = "standard",
+                        nperms = 10, standardize = TRUE, trace = TRUE)
+print(perm.out)
+CCA.out <- CCA(x=logCPM, z=INDX, typex = "standard", typez = "standard",
+               penaltyx = 0.7, penaltyz = 0.7,
+               K=3, v=perm.out$v.init[,1], standardize = TRUE,
+               trace = TRUE) 
+
+print(CCA.out, verbose=FALSE)
+@
+
+
+Mixture model approach:
+<<>>=
+
+library(mclust)
+
+U <- CCA.out$u
+V <- CCA.out$v
+
+
+P_s <- CCA.out$u
+P_t <- CCA.out$v
+
+
+X_s <- svd(t(P_s - rowMeans(P_s)))$u
+X_t <- svd(t(P_t - rowMeans(P_t)))$u
+M <- t(X_s) %*% X_t
+A_s <- P_s %*% X_s %*% M
+A_t <- P_t %*% X_t
+
+cc2 <- RColorBrewer::brewer.pal(8,"Dark2")
+
+A <- rbind(A_s,A_t)
+
+
+plot(A[,1:2], cex = 0.5)
+text(A[,1:2], 
+      labels = c(colnames(y), names(TNBC))
+     )
+
+
+
+fit_mclust <- Mclust(A[,1:2],G = 6)
+summary(fit_mclust)
+fit_mclust$BIC
+
+table(fit_mclust$classification)
+
+plot(A[,1:2], cex = 0.5)
+text(A[,1:2], col = cc2[fit_mclust$classification],
+      labels = c(colnames(y), names(TNBC))
+     )
+
+
+
+
+library("ggsci")
+library(ggplot2)
+color10 <- pal_npg("nrc")(10)
+
+ggdat <- A[,1:2]
+colnames(ggdat) <- c("dim1","dim2")
+ggdat <- data.frame(ggdat)
+ggdat$name <- as.character(c(colnames(y), names(TNBC)))
+ggdat$group <- as.factor(c(gsub("\\.[123]","", sample_annot$cell[grep("Med",sample_annot$cell, invert = TRUE)]),
+                           rep("gene signatures", length(TNBC)))
+                         )
+
+
+curve_df <- data.frame(x= c(0,0,0,0),
+                       y= c(0,0,0,0),
+                      xend= c(-0.73,1,-0.03,-0.15),
+                      yend= c(0.23,0.15,-0.38,-0.65))
+
+curve_df$group <- c(rep("g1",2), rep("g2",2))
+
+
+p <- ggplot(ggdat, aes(x = dim1, y = dim2))
+p + geom_point(aes(color = group), size = 5) +
+  scale_color_npg()  +
+  theme_bw() +
+  geom_text(data = subset(ggdat, group %in% "gene signatures"),
+                  aes(label= name), vjust=-1.5, color="black",
+            position = position_dodge(0.9), size=4) +
+  ggtitle("BL1, BL2, LAR and M axis") + xlab("Dimension 1") + ylab("Dimesion 2") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + xlim(-0.75,NA) 
+  # geom_curve(data = subset(curve_df, group %in% "g1"), aes(x = x, y = y , xend = xend, yend = yend),
+  #            curvature = -0.5,
+  #            arrow = arrow()
+  #            ) +   
+  # geom_curve(data = subset(curve_df, group %in% "g2"), aes(x = x, y = y , xend = xend, yend = yend),
+  #            curvature = 0.5,
+  #            arrow = arrow()
+  #            )
+
+@
+
+<<>>=
+#UMAP
+library(umap)
+iris.umap = umap(A)
+
+
+iris.labels = c(colnames(y2), names(TNBC))
+
+
+
+
+plot(iris.umap$layout[,1], iris.umap$layout[,2],
+     col = cc2[fit_mclust$classification], pch = 19)
+text(iris.umap$layout[,1], iris.umap$layout[,2], labels = iris.labels, pos = 3)
+
+
+
+
+ggdat <- iris.umap$layout[,1:2]
+colnames(ggdat) <- c("dim1","dim2")
+ggdat <- data.frame(ggdat)
+ggdat$name <- as.character(c(colnames(y), names(TNBC)))
+ggdat$group <- as.factor(c(gsub("\\.[123]","", sample_annot$cell[grep("Med",sample_annot$cell, invert = TRUE)]),
+                           rep("gene signatures", length(TNBC)))
+                         )
+
+# curve order M, BL2, BL1, LAR
+curve_df <- data.frame(y= c(-1.45, -0.45, 0.45, -.35,1.25,0.1),
+                       x= c(-0.45, 0.25, -.51,-1.1,0.7,1.52),
+                      xend= c(0.2,0.32,-1.3, -1.4,0.48,0.4),
+                      yend= c(-1.65, -1.5,0.8, 0.52,1.53,1.48))
+
+curve_df$group <- c(rep("g2",4),"g1","g2")
+
+library(scales)
+col.pal <- pal_npg()(3)
+show_col(col.pal)
+
+p <- ggplot(ggdat, aes(x = dim1, y = dim2))
+p + geom_point(data = subset(ggdat, group %in% "gene signatures"), color = col.pal[1], shape=21 , size = 5) +
+  geom_point(data = subset(ggdat, !group %in% "gene signatures"), aes(color = group), size = 5) +
+  scale_color_brewer(palette = "Paired", direction = -1)  +
+  theme_bw() +
+  geom_text(data = subset(ggdat, group %in% "gene signatures"),
+                  aes(label= name), vjust=-1.5, color="black",
+            position = position_dodge(0.9), size=4) +
+  ggtitle("UMAP \n BL1, BL2, LAR and M axis") + xlab("Dimension 1") + ylab("Dimesion 2") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) +
+    geom_curve(data = subset(curve_df, group %in% "g2"), aes(x = x, y = y , xend = xend, yend = yend),
+             curvature = -0.2,
+             arrow = arrow()
+             ) +
+      geom_curve(data = subset(curve_df, group %in% "g1"), aes(x = x, y = y , xend = xend, yend = yend),
+             curvature = 0.2,
+             arrow = arrow()
+             )
+
+@
+
+
+
+\end{document}

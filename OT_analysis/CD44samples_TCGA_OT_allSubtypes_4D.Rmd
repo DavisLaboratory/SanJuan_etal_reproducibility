@@ -1,0 +1,2667 @@
+---
+title: "CD44samples_TCGA_OT_allSubtypes_4D"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, include = FALSE, results = 'hide', fig.pos = "H")
+```
+
+
+## RNA-seq profiles: filter low expression and normalize. Calculate CPMs.
+```{r}
+library(edgeR)
+library(limma)
+
+
+path <- "/stornext/General/data/academic/lab_davis/christine_data"
+
+# path <- "/Volumes/Davis_Lab/christine_data/"
+
+
+sample_annot <- read.csv(paste0(path,"/sample_table.csv"))
+
+sample_annot <- sample_annot[,-c(5:7,10)]
+
+sample_annot
+
+load(paste0(path,"/counts_fr.RData"))
+y <- DGEList(counts = counts_fr$counts, genes = counts_fr$annotation)
+
+annot.path <- "/stornext/General/data/academic/lab_davis/genomes/DATA"
+# annot.path <- "/Volumes/Davis_Lab/genomes/DATA"
+
+annot <- read.delim(paste0(annot.path,"/Homo_sapiens.gene_info"), header = FALSE, skip = 1)[,-1]
+colnames(annot) <- c("GeneID", "Symbol", "LocusTag", "Synonyms", 
+                     "dbXrefs","Chromosome", "map_location","description",
+                     "type_of_gene","Symbol_from_nomenclature_authority",
+                     "Full_name_from_nomanclature_authority", 
+                     "Numenclature_status","Other_destignations","Modification_date")
+
+
+idx <- match(rownames(y), annot$GeneID)
+
+y <- y[which(!is.na(idx)),]
+
+
+
+idx <- idx[!is.na(idx)]
+
+gene_lengths <- y$genes$Length
+
+y$genes <- annot[idx,]
+y$genes$Length <- gene_lengths
+
+sample_annot$Sample <- gsub("170223_BSF--","",sample_annot$Sample)
+samplenames <- gsub("BAM_files.CB00GANXX_[12]_170223_BSF\\.\\.([[:digit:]]+)_Human.*","\\1",colnames(y))
+
+col.idx <- match(sample_annot$Sample, samplenames)
+
+y <- y[,col.idx]
+colnames(y) <- sample_annot$cell
+
+TIC_nonTic <- as.factor(ifelse(grepl("TICs",sample_annot$cond),"TIC","nonTIC"))
+
+
+y$samples$group <- as.factor(paste(gsub("\\.[123]","", rownames(y$samples)), TIC_nonTic,sep="_"))
+
+y$samples$group <- gsub("lo","Lo", y$samples$group)
+
+keep <- rowSums(cpm(y) > 0.5) >= 3
+table(keep)
+
+
+y <- y[keep,, keep.lib.sizes = FALSE]
+dim(y)
+
+y <- calcNormFactors(y)
+
+# remove MED populations
+y <- y[,grep("Med", colnames(y), invert = TRUE)]
+
+CPM <- cpm(y, log=TRUE, prior.count = 2)
+rownames(CPM) <- y$genes$Symbol
+```
+
+## TCGA data
+
+```{r}
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+load("TCGA-BRCA_18122019.RData")
+
+clinical_annot <- as.data.frame(colData(data))
+table(clinical_annot$subtype_BRCA_Subtype_PAM50)
+
+
+clinical <- GDCquery_clinic(project = "TCGA-BRCA", type = "clinical")
+
+# data <- data[,clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"]
+# clinical_annot <- clinical_annot[clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal",]
+
+dim(data)
+dim(clinical_annot)
+
+
+# remind myself of what I have:
+# input to CCA : logCPM, INDEX
+# input to UMAP: A 
+# the transformation?
+
+
+
+# Steps: 
+# We first scale the TCGA data by mean and sd of genes in the in-house data
+# The find the product of TCGA_CPM (NxG) by INDEX(GxM) by V(MxK), where
+# N is the number of samples in TCGA, G is number of genes in gene sets, M is the number of genesets, and K are the basis vectors
+# estimated from INDEX matrix corresponding to the V component of the CCA.
+
+y_tcga <- DGEList(counts = assay(data),
+             genes = as.data.frame(mcols(rowRanges(data))))
+
+
+
+
+
+keep <- filterByExpr(y_tcga)
+table(keep)
+
+# keep <- rowSums(cpm(y_tcga) > 0.5) >= 20
+# table(keep)
+
+# y <- y[filterByExpr(y),,keep.lib.size = FALSE]
+
+y_tcga <- y_tcga[keep,,keep.lib.size = FALSE]
+y_tcga <- calcNormFactors(y_tcga)
+
+TCGA_logCPM <- cpm(y_tcga, log = TRUE, prior.count = 2)
+rownames(TCGA_logCPM) <- y_tcga$genes$external_gene_name
+
+# TCGA_logCPM <- TCGA_logCPM[match(rownames(INDX), rownames(TCGA_logCPM)),]
+# TCGA_logCPM[is.na(TCGA_logCPM)] <- 1 # a zero count results in cpm of zero. after log2(0+2)=1 
+# rownames(TCGA_logCPM) <- rownames(INDX)
+
+
+```
+
+```{r eval=FALSE, echo=FALSE}
+# make MDS and or PCA by subtype
+# write PCs to csv
+library(ggplot2)
+library(ggsci)
+col.pal <- pal_nejm()(5)
+#plotMDS(y_tcga, pch = 19, col  = col.pal[as.factor(clinical_annot$subtype_BRCA_Subtype_PAM50)])
+
+# pca <- prcomp(t(TCGA_logCPM), center = TRUE, scale. = TRUE)
+pca <- prcomp(t(log2(y_tcga$counts + 1)), center = TRUE, scale. = TRUE)
+PCA_TCGA <- pca$x
+
+
+
+
+ggdat <- data.frame(PCA_TCGA)
+ggdat$subtype <- clinical_annot$subtype_BRCA_Subtype_PAM50
+
+ggplot(ggdat, aes(x=PC3, y=PC4, color = subtype)) + geom_point()
+
+PCA_TCGA <- ggdat
+PCA_TCGA$subtype <- as.numeric(as.factor(PCA_TCGA$subtype))
+
+# PC3 and PC4 are relevant----
+#write.csv(PCA_TCGA, file ="PCA_BRCA_TCGA_allSubtypes_logcounts_christine.csv")
+
+
+## Are logcounts better for Christine's data ---- 
+
+pca <- prcomp(t(log2(y$counts + 1)), center = TRUE, scale. = TRUE)
+PCA_cd44 <- pca$x
+
+labels <- gsub("\\.[123]","",rownames(PCA_cd44))
+labels <- gsub("(HMLER|HCC38)_","", labels)
+labels <- gsub("lo","Lo", labels)
+labels <- gsub("ZR75-1|MCF7", "luminal", labels)
+
+
+ggplot(data = data.frame(PCA_cd44, name = rownames(PCA_cd44), label = labels),
+       aes(x= PC4, y=PC5, color = label)) + geom_point()
+
+
+PCA_cd44 <- data.frame(pca$x)
+PCA_cd44$label <- as.numeric(as.factor(labels))
+
+#write.csv(PCA_cd44, file ="PCA_CD44_logcounts_christine.csv")
+
+# now that one can successfully transport samples on those PCS, 
+# what genes drive the correlation between the two subspaces (i.e. cell line subspace and TCGA subspace)
+
+
+```
+
+```{r}
+library(org.Hs.eg.db)
+pca_tcga <- prcomp(t(log2(y_tcga$counts + 1)), center = TRUE, scale. = TRUE)
+pca_celline <- prcomp(t(log2(y$counts + 1)), center = TRUE, scale. = TRUE)
+
+gene_loadings_cellline <- data.frame(pca_celline$rotation)
+gene_loadings_cellline$GeneID <- y$genes$Symbol
+
+
+gene_loadings_tcga <- data.frame(pca_tcga$rotation)
+gene_loadings_tcga$GeneID <- y_tcga$genes$external_gene_name
+
+rowsname <- mapIds(org.Hs.eg.db,  keys = rownames(gene_loadings_tcga),
+                                  keytype = "ENSEMBL",
+                                  column = "ENTREZID", multiVals = "first")
+
+ 
+
+
+gene_loadings_cellline <- gene_loadings_cellline[,c("PC2","PC3","GeneID")]
+gene_loadings_tcga <- gene_loadings_tcga[,c("PC3","PC4","GeneID")]
+
+gene_loadings_cellline[order(gene_loadings_cellline$PC2, decreasing = TRUE), ][1:50,]
+gene_loadings_tcga[order(gene_loadings_tcga$PC4, decreasing = TRUE), ][1:50,]
+
+
+## Cell-line --------
+sorted_genes_cellline_dim1 <- rownames(gene_loadings_cellline[order(gene_loadings_cellline$PC2, decreasing = TRUE), ])
+sorted_genes_cellline_dim2 <- rownames(gene_loadings_cellline[order(gene_loadings_cellline$PC3, decreasing = TRUE), ])
+
+kegg_results_cellline <- topKEGG(kegga(as.character(
+  c(sorted_genes_cellline_dim1[1:500], tail(sorted_genes_cellline_dim1, 500),
+    sorted_genes_cellline_dim2[1:500],  tail(sorted_genes_cellline_dim2, 500))
+  )),
+  number = Inf)
+
+kegg_results_cellline <- kegg_results_cellline[kegg_results_cellline$P.DE < 0.05,]
+
+## TCGA -----
+sorted_genes_tcga_dim1 <- rowsname[order(gene_loadings_tcga$PC3, decreasing = TRUE)]
+sorted_genes_tcga_dim2 <- rowsname[order(gene_loadings_tcga$PC4, decreasing = TRUE)]
+
+
+
+kegg_results_tcga <- topKEGG(kegga(as.character(
+    c(sorted_genes_tcga_dim1[1:500], tail(sorted_genes_tcga_dim1, 500),
+    sorted_genes_tcga_dim2[1:500],  tail(sorted_genes_tcga_dim2, 500))
+  
+  )),
+  number = Inf)
+
+
+kegg_results_tcga <- kegg_results_tcga[kegg_results_tcga$P.DE < 0.05,]
+
+
+# library(xlsx)
+# 
+# write.xlsx(kegg_results_cellline, 
+#            file = "KEGG_results_on_mappable_PC_dimensions.xlsx",
+#            row.names = TRUE, sheetName = "cell line")
+# 
+# 
+# write.xlsx(kegg_results_tcga,
+#            file = "KEGG_results_on_mappable_PC_dimensions.xlsx",
+#            row.names = TRUE, sheetName = "TCGA BRCA", append = TRUE)
+
+
+length(intersect(kegg_results_tcga$Pathway, kegg_results_cellline$Pathway))
+length(setdiff(kegg_results_tcga$Pathway, kegg_results_cellline$Pathway))
+length(setdiff(kegg_results_cellline$Pathway, kegg_results_tcga$Pathway))
+
+
+kegg_results_tcga$study <- "TCGA"
+kegg_results_cellline$study <- "cellline"
+
+kegg_results_tcga$status <- "TCGA"
+kegg_results_tcga$status[kegg_results_tcga$Pathway %in% intersect(kegg_results_tcga$Pathway, kegg_results_cellline$Pathway)] <- "both"
+
+
+kegg_results_cellline$status <- "Cell line data"
+kegg_results_cellline$status[kegg_results_cellline$Pathway %in% intersect(
+  kegg_results_cellline$Pathway,
+  kegg_results_tcga$Pathway)] <- "both"
+
+
+
+ggdat <- rbind(kegg_results_tcga, kegg_results_cellline)
+ggdat$logPval <- -log10(ggdat$P.DE)
+ggdat <- ggdat[!duplicated(ggdat[,c(1, 6)]),]
+
+ggdat$Pathway <- as.factor(ggdat$Pathway)
+
+library(ggplot2)
+
+ggplot(ggdat, aes(x=Pathway, y = logPval, fill = status, color = status)) +
+  geom_dotplot(binaxis='y', stackdir='center') + coord_flip()
+
+
+
+# extract genes in Steroid biosynthesis
+db <- getGeneKEGGLinks(convert = TRUE)
+db <- db[db$PathwayID %in% "path:hsa00100",]
+
+
+#### what are the genes in cellline data in biosynthesis pathway?
+db <- db[db$GeneID %in% c(sorted_genes_cellline_dim1[1:500], tail(sorted_genes_cellline_dim1, 500),
+    sorted_genes_cellline_dim2[1:500],  tail(sorted_genes_cellline_dim2, 500)),]
+
+db$Symbol <- y$genes$Symbol[match(db$GeneID, y$genes$GeneID)]
+# write.csv(db, file = "genes_in_Steroid_biosynthesis_pathway_OT_analysis.csv", row.names = FALSE)
+
+### get the genes in common pathways
+common_pathways <- rownames(ggdat)[ggdat$status %in% "both"] 
+db <- getGeneKEGGLinks(convert = TRUE)
+db <- db[db$PathwayID %in% common_pathways,]
+db$Symbol <- mapIds(org.Hs.eg.db, keys = db$GeneID, column = "SYMBOL",
+                    keytype = "ENTREZID")
+db$pathway <- ggdat$Pathway[match(db$PathwayID, rownames(ggdat))]
+# write.csv(db, file = "genes_in_common_pathways_OT_analysis.csv", row.names = FALSE)
+
+
+
+db <- db[grep("[lL]euk", db$pathway, invert = TRUE), ]
+db$pathway <- droplevels(db$pathway)
+
+
+# create venn of the genes
+
+library(VennDiagram)
+ 
+# Generate 3 sets of 200 words
+set1 <- c(
+  sorted_genes_tcga_dim1[1:500],
+  tail(sorted_genes_tcga_dim1, 500),
+    sorted_genes_tcga_dim2[1:500], 
+    tail(sorted_genes_tcga_dim2, 500))
+set2 <- c(
+  sorted_genes_cellline_dim1[1:500],
+  tail(sorted_genes_cellline_dim1, 500),
+    sorted_genes_cellline_dim2[1:500], 
+    tail(sorted_genes_cellline_dim2, 500))
+
+
+
+set1 <- set1[!is.na(set1)]
+set2 <- set2[!is.na(set2)]
+
+# Prepare a palette of 3 colors with R colorbrewer:
+library(RColorBrewer)
+myCol <- brewer.pal(3, "Dark2")
+
+# Chart
+vd <- venn.diagram(
+        x = list(set1, set2),
+        category.names = c("TCGA features" , "Cell-line features"),
+        # filename = 'TNBC_naive_venn_diagramm.png',
+        filename = NULL,
+        output=TRUE,
+        
+        
+        main = "2nd dimensions only",
+        # Output features
+        # imagetype="png" ,
+        # height = 480 , 
+        # width = 480 , 
+        resolution = 300,
+        # compression = "lzw",
+        
+        # Circles
+        #lwd = 2,
+        lty = 'blank',
+        fill = myCol[1:2],
+        alpha = 0.4,
+        
+        # Numbers
+        cex = 1.2,
+        fontface = "bold",
+        fontfamily = "arial",
+        
+        # Set names
+        cat.cex = 0.95,
+        cat.fontface = "bold",
+        #cat.default.pos = "outer",
+        cat.pos = c(-17, 17),
+        #cat.dist = c(0.015, 0.055, 0.035),
+        cat.fontfamily = "arial",
+        # rotation = 1
+)
+
+
+print(grid.draw(vd))
+
+
+```
+
+
+```{r network_figure}
+library(biomaRt)
+
+
+mart <- useMart(biomart = "ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host = "asia.ensembl.org") 
+
+go_list <- getBM(attributes=c("go_id", 
+                              "name_1006",
+                              "external_gene_name", "ensembl_gene_id", "entrezgene_id"),
+              filters = "go",
+              values = c(
+                
+                # AR related terms
+                "GO:0030521","GO:0060520",
+                         "GO:0050681",
+                         
+                         #cell cycle
+                         "GO:0007049",
+                         # this last one is apoptosis
+                         "GO:0006915"),
+              mart=mart)
+
+
+AR_go_list <- go_list[go_list$go_id %in% c(
+                
+                # AR related terms
+                "GO:0030521","GO:0060520",
+                         "GO:0050681"),]
+
+AR_binding_go_list <- go_list[go_list$go_id %in% c("GO:0050681"),]
+
+apoptosis_go_list <- go_list[go_list$go_id %in% c(
+                         # this last one is apoptosis
+                         "GO:0006915"),]
+apoptosis_go_list <- apoptosis_go_list[!duplicated(apoptosis_go_list$entrezgene_id),]
+
+
+
+cellcycle_go_list <- go_list[go_list$go_id %in% c(
+                         #cell cycle
+                         "GO:0007049"),]
+cellcycle_go_list <- cellcycle_go_list[!duplicated(cellcycle_go_list$entrezgene_id),]
+
+
+table(db$GeneID %in% AR_go_list$entrezgene_id)
+table(db$GeneID %in% apoptosis_go_list$entrezgene_id)
+table(db$GeneID %in% cellcycle_go_list$entrezgene_id)
+
+db$ensembl <- mapIds(org.Hs.eg.db,
+                     keys = db$GeneID,
+                     column = "ENSEMBL",
+                     keytype = "ENTREZID")
+
+
+db$pathway <- as.character(db$pathway)
+db$pathway[db$ensembl %in% cellcycle_go_list$ensembl_gene_id] <- "Cell cycle"
+db$pathway[db$ensembl %in% apoptosis_go_list$ensembl_gene_id] <- "Apoptosis"
+db$pathway[db$ensembl %in% AR_go_list$ensembl_gene_id] <- "AR signalling"
+
+# drop a few terms
+
+db <- db[!db$pathway %in% c("Pathways in cancer",
+                            "Small cell lung cancer",
+                            "Non-small cell lung cancer"),]
+
+
+
+
+table(db$pathway)
+
+
+## read data from reactome
+
+reactomedb <- read.delim("reactome.homo_sapiens.interactions.tab-delimited.txt",
+                         stringsAsFactors = FALSE)
+
+
+reactomedb$Interactor.1.Ensembl.gene.id <- sapply(reactomedb$Interactor.1.Ensembl.gene.id, FUN= function(x){
+  m <- unlist(strsplit(as.character(x), split = "\\|"))
+  gsub("ENSEMBL:", "", m[grep("ENSG", m)])[1] # this is to ensure only one id is returned if there are multiple ENGSs
+})
+
+
+reactomedb$Interactor.2.Ensembl.gene.id <- sapply(reactomedb$Interactor.2.Ensembl.gene.id, FUN= function(x){
+  m <- unlist(strsplit(as.character(x), split = "\\|"))
+  gsub("ENSEMBL:", "", m[grep("ENSG", m)])[1] # this is to ensure only one id is returned if there are multiple ENGSs
+})
+
+
+
+
+reactomedb <- reactomedb[(reactomedb$Interactor.1.Ensembl.gene.id %in% db$ensembl) |
+                          (reactomedb$Interactor.2.Ensembl.gene.id %in% db$ensembl), ]
+
+
+# keep interactions only (these are the relations)
+reactomedb <- reactomedb[, c("Interactor.1.Ensembl.gene.id",
+                             "Interactor.2.Ensembl.gene.id")]
+
+
+
+reactomedb <- unique(reactomedb)
+
+reactomedb <- reactomedb[(reactomedb$Interactor.1.Ensembl.gene.id %in% db$ensembl) &
+                          (reactomedb$Interactor.2.Ensembl.gene.id %in% db$ensembl), ]
+
+
+table(reactomedb$Interactor.1.Ensembl.gene.id %in% db$ensembl)
+table(reactomedb$Interactor.2.Ensembl.gene.id %in% db$ensembl)
+
+
+# remove loops
+reactomedb <- reactomedb[reactomedb$Interactor.1.Ensembl.gene.id !=  reactomedb$Interactor.2.Ensembl.gene.id,]
+
+
+
+
+library(igraph)
+library(RCy3)
+library(RJSONIO)
+library(httr)
+
+relations <- reactomedb
+
+node_attributes <- data.frame(node = union(reactomedb$Interactor.1.Ensembl.gene.id,
+                                           reactomedb$Interactor.2.Ensembl.gene.id))
+
+node_attributes$Symbol <- db$Symbol[match(node_attributes$node, db$ensembl)]
+node_attributes$pathway <- db$pathway[match(node_attributes$node, db$ensembl)]
+
+# node_attributes$pathway[node_attributes$node %in% AR_go_list$ensembl_gene_id] <- "AR signalling"
+
+table(db$pathway)
+table(node_attributes$pathway)
+
+
+relations <- apply(relations, 2, as.character)
+
+net <- graph_from_edgelist(data.matrix(relations), directed = FALSE)
+
+
+V(net)$GO <- as.character(node_attributes$pathway[match(names(V(net)), node_attributes$node)])
+V(net)$Symbol <- as.character(node_attributes$Symbol[match(names(V(net)), node_attributes$node)])
+
+# let the target nodes to be smaller so that relationships are more evident
+V(net)$size <- ifelse(V(net)$Symbol %in% "AR",15,5)
+
+
+
+
+
+
+
+l <- layout_with_kk(net)
+
+
+library(NetPathMiner)
+# set.seed(1346)
+set.seed(2021)
+
+# set.seed(1)
+
+# col.pal <- RColorBrewer::brewer.pal(11, "Spectral")
+col.pal <- c(ggsci::pal_npg()(10), ggsci::pal_lancet()(1))
+GO <- factor(V(net)$GO, levels = )
+
+node_col <- col.pal[GO]
+
+# color the AR edges: AR id ENSG00000169083, edge color has to be "#4DBBD5FF"
+table(relations[,1] %in% "ENSG00000169083" |
+                                  relations[,2] %in% "ENSG00000169083")
+
+
+net <- setAttribute(net, "GO", V(net)$GO)
+
+v.layout <- layoutVertexByAttr(net, "GO", 
+                               cluster.strength=200
+                                #layout = layout_with_fr
+                               #layout = layout_with_kk
+                               )
+
+target_nodes <- as.character(node_attributes$node[node_attributes$pathway %in% "AR signalling"])
+
+
+plotNetwork(net,  
+            vertex.label = node_attributes$Symbol[match(names(V(net)), node_attributes$node)],
+            # vertex.shape = c("square","circle")[as.factor(V(net)$nodeType)],
+            vertex.color = node_col, 
+            vertex.frame.color =  node_col, #c("#4D4D4D"),
+            # edge.lty = c(1:3)[REG], 
+            edge.color = ifelse(relations[,1] %in%  target_nodes |
+                                  relations[,2] %in% target_nodes, 
+                                "#4DBBD5FF",
+                               "gray80"),
+            #vertex.label.font= 2, 
+            vertex.label.cex = 0.35,
+            # edge.width = c(1.7,0.55,0.22)[REG]  ,
+            # vertex.label.dist = -0.1,
+            vertex.label.color = "White",
+            layout=v.layout)
+
+
+# legend(x=-1.98, y=1.2, levels(GO), pch=19,
+#        col= col.pal[as.factor(levels(GO))], #pt.bg=colrs
+#        pt.cex=2.2, cex=0.92, bty="n", ncol=1)
+
+
+legend(x=-2.2, y=1.5, levels(GO), pch=19,
+       col= col.pal[as.factor(levels(GO))], #pt.bg=colrs
+       pt.cex=2.2, cex=0.92, bty="n", ncol=1)
+
+
+
+meta.data <- as_data_frame(net, 'vertices')
+
+# manually encode the edge and vertex attributes to the igraph object:
+
+
+
+net <- set.vertex.attribute(net, "label", index = V(net), value = node_attributes$Symbol[match(names(V(net)), node_attributes$node)])
+
+net <- set.vertex.attribute(net, "color", index = V(net), value = node_col)
+net <- set.vertex.attribute(net, "frame.color", index = V(net), value = node_col)
+# net <- set.vertex.attribute(net, "label.font", index = V(net), value = 2)
+net <- set.vertex.attribute(net, "label.cex", index = V(net), value = 0.35)
+net <- set.vertex.attribute(net, "label.color", index = V(net), value = "White")
+net <- set.vertex.attribute(net, "size", index = V(net), value = meta.data$size)
+
+graph_attr(net, "layout") <- v.layout
+
+
+# save(net, file="network_data_OT_common_genes_for_cytoscape_export.RData")
+```
+
+## Domain Adaptation via Optimal Transport
+
+
+Source and target dataset before and after OT:
+```{r include=TRUE, results='hold', fig.align="center", out.width="99%"}
+knitr::include_graphics("ChristineCD44_source_target_samples.png")
+```
+
+```{r include=TRUE, results='hold', fig.align="center", out.width="99%"}
+knitr::include_graphics("ChristineCD44_TCGA_couplings_and_transport.png")
+
+```
+
+```{r include=TRUE, results='hold', fig.align="center", out.width="99%"}
+knitr::include_graphics("ChristineCD44_TCGA_transport_EMDs.png")
+```
+
+
+Using couplings
+```{r}
+EMDLaplaceTransport_coupling <- read.csv("Transported_samples_EMDLaplaceTransport_coupling_allSubtypesAnalysis_4D.csv")
+# EMDLaplaceTransport_coupling <- read.csv("Transported_samples_EMDTransport_couplingProbs.csv")
+rownames(EMDLaplaceTransport_coupling) <- colnames(TCGA_logCPM)
+EMDLaplaceTransport_coupling$X <- NULL
+colnames(EMDLaplaceTransport_coupling) <- colnames(CPM)
+head(EMDLaplaceTransport_coupling)
+```
+
+
+```{r}
+maxProbs <- apply(EMDLaplaceTransport_coupling, 1, FUN=function(x) colnames(EMDLaplaceTransport_coupling)[which.max(x)])
+maxProbs <- gsub("\\.[123]","", maxProbs)
+maxProbs <- gsub("(HMLER|HCC38)_","", maxProbs)
+maxProbs <- gsub("lo","Lo", maxProbs)
+maxProbs <- gsub("ZR75-1|MCF7", "luminal", maxProbs)
+table(maxProbs)
+```
+
+
+Using Embedding
+```{r include=TRUE}
+EMDLaplaceTransport_embedding <- read.csv("Transported_samples_EMDLaplaceTransport_allSubtypesAnalysis_4D.csv")
+target_PCA <- read.csv("PCA_CD44_logcounts_christine.csv")
+
+library(ggplot2)
+library(viridis)
+library(ggsci)
+library(jcolors)
+library(cowplot)
+
+# remember to discard PC1 and PC2
+# look at expression of CDH4, ER, HER2, PGR
+
+labels <- gsub("\\.[123]","", target_PCA$X)
+#labels <- gsub("(HMLER|HCC38)_","", labels)
+labels <- gsub("lo","Lo", labels)
+#labels <- gsub("ZR75-1|MCF7", "luminal", labels)
+
+ggdat <- data.frame(dim1 = c(target_PCA$PC2, EMDLaplaceTransport_embedding$X0),
+                    dim2 = c(target_PCA$PC3, EMDLaplaceTransport_embedding$X1),
+                    subtype = c(labels, clinical_annot$subtype_BRCA_Subtype_PAM50),
+                    name = c(labels, rep("TCGA", ncol(TCGA_logCPM))),
+                    group = c(rep("cell-line", length(labels)), rep("TCGA", ncol(TCGA_logCPM))))
+
+
+ggdat <- cbind(ggdat, rbind(scale(t(CPM[c("ESR1","ERBB2","PGR","AR","MKI67", "CD44"),])), 
+                            scale(t(TCGA_logCPM[c("ESR1","ERBB2","PGR","AR","MKI67","CD44"),]))))
+
+ggdat <- reshape2::melt(ggdat, id = c("dim1","dim2", "name","group","subtype"))
+
+
+ggplot(subset(ggdat, !name %in% "TCGA"), aes(x=dim1, y=dim2, color= subtype, shape = group)) + 
+  geom_point(size=12) +
+  #scale_color_brewer(palette = "Paired")
+  #scale_color_viridis_d(begin = 0.1, end = 0.7) +
+  #scale_color_npg() +
+   geom_point(data = subset(ggdat, name %in% "TCGA"), aes(x=dim1, y=dim2, color= subtype, shape = group), size=6, alpha=1) +
+  scale_color_manual(values = c('ZR75-1' = "#A6CEE3", 'MCF7' = "#1F78B4", 
+                                "HMLER_CD44Lo" = "#B2DF8A", "HMLER_CD44Hi" = "#33A02C",
+                                "HCC38_CD44Hi" = "#E31A1C" , "HCC38_CD44Lo" = "#FB9A99",
+                                "LumA"= "#CAB2D6", "LumB" = "#6A3D9A", "Normal" = "#FFFF99",
+                                "Her2" = "#B15928", "Basal" = "#FF7F00")) +
+  #scale_shape_identity(name = '', guide = 'legend',labels = c('cell-line','TCGA')) +
+  scale_shape_manual(values = c('cell-line' = 19, 'TCGA' = 3))+
+  theme(legend.position = "top") + labs(color ="", shape = "") +
+  guides(shape = guide_legend(nrow = 3,override.aes = list(size = 5)), 
+         color = guide_legend(override.aes = list(size = 5)))
+
+```
+
+
+```{r include=TRUE, fig.height=4, fig.width=14}
+ggplot(subset(ggdat, name %in% "TCGA"), aes(x=dim1, y=dim2, color= value)) + 
+  geom_point(size=1.5) + facet_wrap(.~ variable) +
+  scale_color_gsea() 
+```
+
+
+
+```{r eval=FALSE, echo=FALSE}
+ggplot(subset(ggdat, (name %in% "TCGA") & variable %in% c("ESR1","ERBB2","PGR")), aes(x=dim1, y=dim2, color= value)) + 
+  geom_point(size=1.5) + facet_wrap(.~ variable) +
+  scale_color_gsea() 
+```
+
+
+
+
+Kaplan Meier Curves
+```{r include=TRUE}
+i <- is.na(clinical_annot$subtype_vital_status)
+table(i)
+
+
+i <- is.na(clinical_annot$vital_status)
+table(i)
+
+#clinical_annot <- clinical_annot[!i,]
+clinical_annot$status <- ifelse(clinical_annot$vital_status == "Dead",1,0)
+clinical_annot$OS <- clinical_annot$days_to_death 
+clinical_annot$OS[is.na(clinical_annot$OS)] <- clinical_annot$days_to_last_follow_up[is.na(clinical_annot$OS)]
+clinical_annot$transportedLabels <- maxProbs
+clinical_annot$inferredLabels <- maxProbs
+
+
+library(survival)
+library(survminer)
+
+fit2 <- survfit(Surv(OS, status) ~ transportedLabels  , data = subset(clinical_annot, !transportedLabels %in% "luminal"))
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+           palette =c("#DE1A1A", "navy"),
+           xlab="Days",
+           )
+
+```
+
+
+```{r include=TRUE}
+# version with all three labels
+fit2 <- survfit(Surv(OS, status) ~ inferredLabels  , data = clinical_annot)
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+           palette =c("#DE1A1A", "navy", "orange"),
+           xlab="Days",
+           )$plot + scale_color_manual(name = "",
+                          breaks = c("inferredLabels=CD44Hi", "inferredLabels=CD44Lo", "inferredLabels=luminal"),
+                          labels = c("CD44Hi - n=368", "CD44Lo - n=364", "Luminal - n=370"),
+                          values = c("#DE1A1A", "navy", "orange"),
+                          guide = "legend") + theme(legend.position = c(0.8, 0.9), legend.key.size = unit(2,"line")) +
+  guides(color = guide_legend(override.aes = list(size = 2)))
+
+
+
+########### ------
+clinical_annot$OT <- ifelse(maxProbs %in% "CD44Hi", "CD44Hi-like", "not CD44Hi-like")
+fit2 <- survfit(Surv(OS, status) ~ OT  , data = clinical_annot)
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+           palette =c("#DE1A1A", "navy"),
+           xlab="Days",
+           )$plot + scale_color_manual(name = "",
+                          breaks = c("OT=CD44Hi-like", "OT=not CD44Hi-like"),
+                          labels = c("CD44Hi-like - n=368", "not CD44Hi-like - n=734"),
+                          values = c("#DE1A1A", "navy"),
+                          guide = "legend") + theme(legend.position = c(0.8, 0.9), legend.key.size = unit(2,"line")) +
+  guides(color = guide_legend(override.aes = list(size = 2)))
+
+
+
+#### perhaps take those that are CD44Hi and ER/HER2/PGR negative--------
+# exprs_data <- scale(t(TCGA_logCPM[c("ESR1","ERBB2","PGR"),]))
+# 
+# TN <- (rowSums(exprs_data < 0) == 3)
+# table(TN)
+# 
+# table(TN, maxProbs)
+# AR_exprs <- scale(TCGA_logCPM[c("AR"),])
+# AR <- AR_exprs < 0 
+# 
+# 
+# table((maxProbs %in% "CD44Hi") & (TN & AR))
+# 
+# clinical_annot$OT_reclassification <- ifelse((maxProbs %in% "CD44Hi") & TN , "CD44Hi-like", "not CD44Hi-like")
+# fit2 <- survfit(Surv(OS, status) ~ OT_reclassification  , data = clinical_annot)
+# ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+#            palette =c("#DE1A1A", "navy"),
+#            xlab="Days",
+#            )
+
+
+
+fit2 <- survfit(Surv(OS, status) ~ subtype_BRCA_Subtype_PAM50  , data = clinical_annot)
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+           #palette =c("#DE1A1A", "navy"),
+           xlab="Days",
+           )
+```
+
+
+Now that the samples are transported, perhaps the most reasonable next step is to develop a classifier for CD44hi vs everything else:
+```{r}
+library(e1071)
+library(LiblineaR)
+library(caret)
+
+
+
+labels <- gsub("\\.[123]","", target_PCA$X)
+labels <- gsub("(HMLER|HCC38)_","", labels)
+labels <- gsub("lo","Lo", labels)
+labels <- gsub("ZR75-1|MCF7", "luminal", labels)
+
+
+
+x_train <- target_PCA[, paste0("PC",2:5)]
+y_train <- as.factor(labels)
+
+
+x_new <- EMDLaplaceTransport_embedding[,-1]
+colnames(x_new) <- colnames(x_train)
+rownames(x_new) <- colnames(TCGA_logCPM)
+
+
+set.seed(897)
+
+bcell_svm <- train(x = x_train,
+                 y =y_train,
+                 #class.weights = "inverse",
+                 #trControl=train_control,
+                  method = "svmLinear", # note originally used svmLinear3
+                 trControl = trainControl(classProbs =  TRUE),
+                 #method = "svmRadial",
+                 #method = 'svmPoly', degree = 2,
+                 probability = TRUE)
+bcell_svm
+
+
+
+target_preds <- predict(bcell_svm, x_new)
+table(target_preds)
+table(target_preds, clinical_annot$subtype_BRCA_Subtype_PAM50)
+
+# extract probablities for enrichment analysis----
+da_svm_probs <- predict(bcell_svm, x_new, type="prob")
+
+```
+
+
+```{r include=TRUE}
+
+ggdat <- data.frame(dim1 = c(target_PCA$PC2, EMDLaplaceTransport_embedding$X0),
+                    dim2 = c(target_PCA$PC3, EMDLaplaceTransport_embedding$X1),
+                    name = c(labels, rep("TCGA", ncol(TCGA_logCPM))))
+ggdat$DA_SVM <- c(rep(NA,18), as.character(target_preds))
+ggplot(subset(ggdat, name %in% "TCGA"), aes(x=dim1, y=dim2, color= DA_SVM)) + 
+  geom_point(size=1.5) + scale_color_nejm()
+
+
+
+clinical_annot$DA_SVM <- as.factor(target_preds)
+
+# subset(clinical_annot, !sample %in% "TCGA-GM-A2DA-01A")
+
+fit2 <- survfit(Surv(OS, status) ~ DA_SVM  , data = clinical_annot)
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+           palette =c("#DE1A1A", "navy", "orange"),
+           xlab="Days",
+           )$plot + scale_color_manual(name = "",
+                          breaks = c("DA_SVM=CD44Hi", "DA_SVM=CD44Lo", "DA_SVM=luminal"),
+                          labels = c("Inferred CD44Hi - n=308", "Inferred CD44Lo - n=312", "Inferred Luminal - n=345"),
+                          values = c("#DE1A1A", "navy", "orange"),
+                          guide = "legend") + theme(legend.position = c(0.8, 0.9), legend.key.size = unit(2,"line")) +
+  guides(color = guide_legend(override.aes = list(size = 2)))
+
+
+
+
+
+
+clinical_annot$DA_SVM_reclassification <- as.factor(ifelse(target_preds == "CD44Hi" & clinical_annot$subtype_BRCA_Subtype_PAM50 == "Basal",
+                                                    "CD44Hi-like", "not CD44Hi-like"))
+
+
+
+
+
+fit2 <- survfit(Surv(OS, status) ~ DA_SVM_reclassification, data = subset(clinical_annot, subtype_BRCA_Subtype_PAM50 %in% "Basal"))
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours \n Basal subtypes",
+           palette =c("#DE1A1A", "navy"),
+           xlab="Days",
+           )$plot + scale_color_manual(name = "",
+                          breaks = c("DA_SVM_reclassification=CD44Hi-like", "DA_SVM_reclassification=not CD44Hi-like"),
+                          labels = c("Basal, inferred CD44Hi - n=161", "Basal, not inferred CD44Hi - n=18"),
+                          values = c("#DE1A1A", "navy"),
+                          guide = "legend") + theme(legend.position = c(0.8, 0.98), legend.key.size = unit(2,"line")) +
+  guides(color = guide_legend(override.aes = list(size = 1)))
+
+
+# re-define pam50 -----
+
+clinical_annot$pam50_revisited <- clinical_annot$subtype_BRCA_Subtype_PAM50
+clinical_annot$pam50_revisited[clinical_annot$DA_SVM_reclassification %in% "CD44Hi-like"] <- "Basal, CD44Hi-like"
+
+table(clinical_annot$pam50_revisited)
+
+
+fit2 <- survfit(Surv(OS, status) ~ pam50_revisited  , data = clinical_annot)
+ggsurvplot(fit2, pval = TRUE, title= "BRCA TCGA primary tumours",
+           #palette =c("#DE1A1A", "navy"),
+           palette = pal_jama()(6),
+           xlab="Days to death",
+           )$plot + scale_color_manual(name = "",
+                          breaks = names(fit2$strata),
+                          labels = paste(gsub("pam50_revisited=","", names(fit2$strata)), paste0("n=", fit2$strata)),
+                          values = pal_jama()(6),
+                          guide = "legend") + theme(legend.text=element_text(size=15)) + guides(colour = guide_legend(override.aes = list(size=8)))
+
+## remember what we want to show is that CD44Hi-like samples have poor prognosis compared to other basals? ------
+
+
+# play around with different subset of the data (basals have better survivals than LumA, but poorer survival than LumB) ----
+# fit2 <- survfit(Surv(OS, status) ~ DA_SVM_reclassification  , data = subset(clinical_annot, ! subtype_BRCA_Subtype_PAM50 %in% c("Her2", "Normal", "LumA")))
+# ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours",
+#            palette =c("#DE1A1A", "navy"),
+#            xlab="Days",
+#            )
+
+```
+
+
+```{r eval=FALSE, echo=FALSE}
+
+y_train <- as.factor(ifelse(labels == "CD44Hi", 1, 0))
+
+set.seed(897)
+bcell_svm <- train(x = x_train,
+                 y =y_train,
+                 #class.weights = "inverse",
+                 #trControl=train_control,
+                  method = "svmLinear3",
+                 #method = "svmRadial",
+                 #method = 'svmPoly', degree = 2,
+                 probability = TRUE)
+bcell_svm
+
+
+
+target_preds <- predict(bcell_svm, x_new)
+table(target_preds)
+
+
+clinical_annot$DA_SVM <- as.factor(target_preds)
+
+fit2 <- survfit(Surv(OS, status) ~ DA_SVM  , data = clinical_annot)
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours \n Basal subtype",
+           palette =c("#DE1A1A", "navy"),
+           xlab="Days to Death",
+           )
+```
+
+# KNN analysis and enrichment of DE and putative AR target genes
+
+```{r eval=FALSE}
+# manually define and modify the barcodeplot function
+barcodeplot <- function (statistics, index = NULL, index2 = NULL, gene.weights = NULL, 
+    weights.label = "Weight", labels = c("Down", "Up"), quantiles = c(-1, 
+        1) * sqrt(2), col.bars = NULL, alpha = 0.4, worm = TRUE, 
+    span.worm = 0.45, xlab = "Statistic", ...) 
+{
+    if (!is.vector(statistics, mode = "numeric")) 
+        stop("statistics should be a numeric vector")
+    nstat <- length(statistics)
+    if (is.null(index)) {
+        if (is.null(gene.weights)) {
+            stop("Must specify at least one of index or gene.weights")
+        }
+        else {
+            if (length(gene.weights) == nstat) {
+                index <- rep_len(TRUE, nstat)
+                index2 <- NULL
+            }
+            else {
+                stop("No index and length(gene.weights) doesn't equal length(statistics)")
+            }
+        }
+    }
+    else {
+        if (any(is.na(index))) 
+            stop("Need to provide index without NAs")
+        if (is.logical(index)) 
+            if (length(index) != nstat) 
+                stop("Length of index disagrees with statistics")
+        if (length(index) > nstat) 
+            stop("Length of index disagrees with statistics")
+    }
+    if (!is.null(index2)) {
+        if (!is.null(gene.weights)) 
+            warning("gene.weights ignored")
+        gene.weights <- statistics
+        gene.weights[] <- 0
+        gene.weights[index] <- 1
+        gene.weights[index2] <- -1
+        index <- rep_len(TRUE, nstat)
+        index2 <- NULL
+    }
+    if (!is.null(gene.weights)) {
+        if (!is.vector(gene.weights, mode = "numeric")) 
+            stop("gene.weights should be a numeric vector")
+        if (any(is.na(gene.weights))) 
+            stop("Need to provide gene.weights without NAs")
+        if (all(gene.weights == 0)) 
+            stop("gene.weights equal to zero: no selected genes to plot")
+        if (length(gene.weights) != length(statistics[index])) 
+            stop("Length of gene.weights disagrees with size of set")
+        one <- all(gene.weights >= 0) | all(gene.weights <= 0)
+        if (one) {
+            index2 <- NULL
+            gene.weights1 <- rep_len(0, nstat)
+            names(gene.weights1) <- names(statistics)
+            gene.weights1[index] <- gene.weights
+            index <- rep_len(FALSE, nstat)
+            names(index) <- names(statistics)
+            index[gene.weights1 != 0] <- TRUE
+            gene.weights1 <- gene.weights1[gene.weights1 != 0]
+            gene.weights <- gene.weights1
+        }
+        else {
+            gene.weights12 <- rep_len(0, nstat)
+            names(gene.weights12) <- names(statistics)
+            gene.weights12[index] <- gene.weights
+            index <- index2 <- rep_len(FALSE, nstat)
+            names(index) <- names(index2) <- names(statistics)
+            index[gene.weights12 > 0] <- TRUE
+            index2[gene.weights12 < 0] <- TRUE
+            gene.weights1 <- gene.weights12[gene.weights12 > 
+                0]
+            gene.weights2 <- gene.weights12[gene.weights12 < 
+                0]
+            gene.weights <- gene.weights1
+        }
+    }
+    TWO <- !is.null(index2)
+    set1 <- set2 <- data.frame(idx = rep.int(FALSE, nstat), weight = NA, 
+        wt = NA)
+    set1$idx[index] <- TRUE
+    if (TWO) 
+        set2$idx[index2] <- TRUE
+    if (length(gene.weights)) {
+        set1$weight <- 0
+        set1$weight[index] <- gene.weights
+        set1$wt <- abs(set1$weight)/sum(abs(set1$weight))
+        if (TWO) {
+            set2$weight <- 0
+            set2$weight[index2] <- gene.weights2
+            SUM <- sum(abs(set1$weight), abs(set2$weight))
+            set1$wt <- abs(set1$weight)/SUM
+            set2$wt <- abs(set2$weight)/SUM
+        }
+    }
+    ostat <- order(statistics, na.last = TRUE, decreasing = FALSE)
+    statistics <- statistics[ostat]
+    set1 <- set1[ostat, ]
+    if (TWO) 
+        set2 <- set2[ostat, ]
+    n <- sum(!is.na(statistics))
+    if (n == 0L) {
+        message("No valid statistics")
+        return(invisible())
+    }
+    if (n < nstat) {
+        statistics <- statistics[1:n]
+        set1 <- set1[1:n, ]
+        if (TWO) 
+            set2 <- set2[1:n, ]
+    }
+    r <- which(set1$idx)
+    if (TWO) {
+        r2 <- which(set2$idx)
+        if (!length(r2)) 
+            TWO <- FALSE
+    }
+    if (!length(r)) 
+        if (TWO) {
+            r <- r2
+            set1 <- set2
+            TWO <- FALSE
+        }
+        else {
+            message("No selected genes to plot")
+            return(invisible())
+        }
+    WTS <- FALSE
+    wt1 <- set1$wt[r]
+    len.up <- 1
+    if (all(!is.na(wt1))) {
+        len.up <- set1$weight[r]/max(abs(set1$weight[r]))
+        anydifferent <- function(x) {
+            if (length(x) < 2) 
+                return(FALSE)
+            r <- range(x)
+            (r[2] > r[1])
+        }
+        if (!TWO) 
+            if (anydifferent(wt1)) 
+                WTS <- TRUE
+        if (TWO) {
+            wt12 <- c(set1$wt[r], abs(set2$wt[r2]))
+            if (anydifferent(wt12)) 
+                WTS <- TRUE
+            max.wt <- max(set1$wt[r], set2$wt[r2])
+            len.up <- set1$wt[r]/max.wt
+            len.down <- set2$wt[r2]/max.wt
+        }
+    }
+    pos.dir <- all(len.up > 0)
+    if (WTS) 
+        shift <- 0.1
+    else shift <- 0
+    quantiles <- sort(quantiles)
+    ALP <- alpha
+    ALP <- min(ALP, 1)
+    ALP <- max(ALP, 0.1)
+    if (is.null(col.bars)) {
+        if (TWO) {
+            col.bars <- c("red", "blue")
+            if (WTS) 
+                col.bars.alpha <- c(rgb(1, 0, 0, alpha = ALP), 
+                  rgb(0, 0, 1, alpha = ALP))
+            else col.bars.alpha <- col.bars
+        }
+        else {
+            col.bars <- "black"
+            if (WTS) 
+                col.bars.alpha <- rgb(0, 0, 0, alpha = ALP)
+            else col.bars.alpha <- col.bars
+        }
+    }
+    else {
+        if (TWO) {
+            if (length(col.bars) == 1) 
+                col.bars <- rep(col.bars, 2)
+            RGB <- col2rgb(col.bars)/255
+            red <- RGB[1, 1]
+            green <- RGB[2, 1]
+            blue <- RGB[3, 1]
+            red2 <- RGB[1, 2]
+            green2 <- RGB[2, 2]
+            blue2 <- RGB[3, 2]
+            if (WTS) 
+                col.bars.alpha <- c(rgb(red, green, blue, alpha = ALP), 
+                  rgb(red2, green2, blue2, alpha = ALP))
+            else col.bars.alpha <- col.bars
+        }
+        else {
+            RGB <- col2rgb(col.bars)/255
+            red <- RGB[1, 1]
+            green <- RGB[2, 1]
+            blue <- RGB[3, 1]
+            if (WTS) 
+                col.bars.alpha <- rgb(red, green, blue, alpha = ALP)
+            else col.bars.alpha <- col.bars
+        }
+    }
+    ylim.worm <- ylim <- c(-1, 1)
+    ylab.worm <- ""
+    xlab.worm <- xlab
+    if (!TWO) 
+        ylim.worm <- c(0, 1)
+    if (worm) {
+        ylim.worm <- c(-2.1, 2.1)
+        if (!TWO) 
+            ylim.worm <- c(0, 2.1)
+    }
+    ylim[2] <- ylim[2] + 0.5
+    if (TWO) 
+        ylim[1] <- ylim[1] - 0.5
+    if (TWO) 
+        plot(1:n, xlim = c(0, n), ylim = c(ylim.worm[1] - shift, 
+            ylim.worm[2] + shift), type = "n", axes = FALSE, 
+            xlab = xlab.worm, ylab = ylab.worm, ...)
+    if (!TWO) 
+        plot(1:n, xlim = c(0, n), ylim = c(ylim.worm[1] - shift * 
+            (!pos.dir), ylim.worm[2] + shift * pos.dir), type = "n", 
+            axes = FALSE, xlab = xlab.worm, ylab = ylab.worm, 
+            ...)
+    npos <- sum(statistics > quantiles[2])
+    nneg <- sum(statistics < quantiles[1])
+    lwd <- 50/length(r)
+    lwd <- min(1.9, lwd)
+    lwd <- max(0.2, lwd)
+    if (TWO) {
+        lwd2 <- 50/length(r2)
+        lwd2 <- min(1.9, lwd2)
+        lwd2 <- max(0.2, lwd2)
+        lwd <- lwd2 <- min(lwd, lwd2)
+    }
+    barlim <- ylim[2] - c(1.5, 0.5)
+    if (!pos.dir) {
+        rect.yb <- 0.5
+        rect.yt <- 1
+        rect(nneg + 0.5, rect.yb, n - npos + 0.5, rect.yt, col = "lightgray", 
+            border = NA)
+        if (nneg) 
+            rect(0.5, rect.yb, nneg + 0.5, rect.yt, col = "lightblue", 
+                border = NA)
+        if (npos) 
+            rect(n - npos + 0.5, rect.yb, n + 0.5, rect.yt, col = "pink", 
+                border = NA)
+        segments(r, barlim[2]/2, r, barlim[2], lwd = lwd, col = col.bars.alpha[1])
+        segments(r, barlim[2]/2 - shift, r, barlim[2]/2 * (1 + 
+            len.up) - shift, lwd = lwd, col = col.bars[1])
+    }
+    if (pos.dir) {
+        rect.yb <- -0.5
+        if (!TWO) 
+            rect.yb <- 0
+        rect.yt <- 0.5
+        rect(nneg + 0.5, rect.yb, n - npos + 0.5, rect.yt, col = "lightgray", 
+            border = NA)
+        if (nneg) 
+            rect(0.5, rect.yb, nneg + 0.5, rect.yt, col = "lightblue", 
+                border = NA)
+        if (npos) 
+            rect(n - npos + 0.5, rect.yb, n + 0.5, rect.yt, col = "pink", 
+                border = NA)
+        segments(r, barlim[1], r, barlim[2]/2, lwd = lwd, col = col.bars.alpha[1])
+        segments(r, barlim[2]/2 + shift, r, barlim[2]/2 * (1 + 
+            len.up) + shift, lwd = lwd, col = col.bars[1])
+    }
+    if (TWO) {
+        barlim2 <- ylim[1] + c(0.5, 1.5)
+        segments(r2, barlim2[1]/2, r2, barlim2[2], lwd = lwd2, 
+            col = col.bars.alpha[2])
+        segments(r2, barlim2[1]/2 * (1 + len.down) - shift, r2, 
+            barlim2[1]/2 - shift, lwd = lwd2, col = col.bars[2])
+    }
+    lab.at <- 0
+    if (!TWO) 
+        lab.at <- 0.5
+    axis(side = 2, at = lab.at, padj = 3.8, cex.axis = 1.2, 
+        labels = labels[1], tick = FALSE)
+    axis(side = 4, at = lab.at, padj = -3, cex.axis =1.2, 
+        labels = labels[2], tick = FALSE)
+    prob <- (0:10)/10
+    axis(at = seq(1, n, len = 11), side = 1, cex.axis = 0.9, 
+        las = 2, labels = format(quantile(statistics, p = prob), 
+            digits = 1), font = 2)
+    if (worm) {
+        rescale <- function(x, newrange, oldrange = range(x)) {
+            newrange[1] + (x - oldrange[1])/(oldrange[2] - oldrange[1]) * 
+                (newrange[2] - newrange[1])
+        }
+        if (!WTS) {
+            ave.enrich1 <- length(r)/n
+            worm1 <- tricubeMovingAverage(set1$idx, span = span.worm)/ave.enrich1
+            if (TWO) {
+                ave.enrich2 <- length(r2)/n
+                worm2 <- tricubeMovingAverage(-set2$idx, span = span.worm)/ave.enrich2
+            }
+        }
+        if (WTS) {
+            ave.enrich1 <- mean(set1$wt)
+            worm1 <- tricubeMovingAverage(set1$wt, span = span.worm)/ave.enrich1
+            if (TWO) {
+                ave.enrich2 <- mean(set2$wt)
+                worm2 <- tricubeMovingAverage(-set2$wt, span = span.worm)/ave.enrich2
+            }
+        }
+        max.worm1 <- max(worm1)
+        r.worm1 <- c(0, max.worm1)
+        worm1.scale <- rescale(worm1, newrange = c(1.1 + shift * 
+            pos.dir, 2.1 + shift * pos.dir), oldrange = r.worm1)
+        if (TWO) {
+            min.worm2 <- min(worm2)
+            r.worm2 <- c(min.worm2, 0)
+            worm2.scale <- rescale(worm2, newrange = c(-2.1 - 
+                shift, -1.1 - shift), oldrange = r.worm2)
+        }
+        if (!TWO) {
+            lines(x = 1:n, y = worm1.scale, col = col.bars[1], 
+                lwd = 2)
+            abline(h = rescale(1, newrange = c(1.1 + shift * 
+                pos.dir, 2.1 + shift * pos.dir), oldrange = r.worm1), 
+                lty = 2)
+            axis(side = 2, at = c(1.1 + shift * pos.dir, 2.1 + 
+                shift * pos.dir), cex.axis = 0.9, labels = c(0, 
+                format(max.worm1, digits = 2)), font = 2)
+            axis(side = 2, labels = "Enrichment", at = 1.6 + 
+                shift * pos.dir, padj = -0.6, tick = FALSE, cex.axis = 0.9, font = 2)
+        }
+        if (TWO) {
+            lines(x = 1:n, y = worm1.scale, col = col.bars[1], 
+                lwd = 2)
+            abline(h = rescale(1, newrange = c(1.1 + shift, 2.1 + 
+                shift), oldrange = r.worm1), lty = 2)
+            lines(x = 1:n, y = worm2.scale, col = col.bars[2], 
+                lwd = 2)
+            abline(h = rescale(-1, newrange = c(-2.1 - shift, 
+                -1.1 - shift), oldrange = r.worm2), lty = 2)
+            axis(side = 2, at = c(1.1 + shift, 2.1 + shift), 
+                cex.axis = 0.9, labels = c(0, format(max.worm1, 
+                  digits = 2)), font=2)
+            axis(side = 2, at = c(-1.1 - shift, -2.1 - shift), 
+                cex.axis = 0.9, labels = c(0, format(-min.worm2, 
+                  digits = 2)), font =2)
+            axis(side = 2, labels = "Enrichment", at = 1.6 + 
+                shift, tick = FALSE, padj = -0.6, cex.axis = 0.9, font=2)
+            axis(side = 2, labels = "Enrichment", at = -1.6 - 
+                shift, tick = FALSE, padj = -0.6, cex.axis = 0.9, font = 2)
+        }
+    }
+    if (WTS) {
+        if (!TWO) {
+            if (pos.dir) {
+                axis(side = 2, at = c(0.5 + shift, 1 + shift), 
+                  cex.axis = 0.88, padj = 1.6, labels = c(0, 
+                    format(max(set1$weight[r]), digits = 2)), font = 2)
+                axis(side = 2, labels = weights.label[1], at = 0.75 + 
+                  shift, padj = 1, tick = FALSE, cex.axis = 0.8)
+            }
+            if (!pos.dir) {
+                axis(side = 2, at = c(0 - shift, 0.5 - shift), 
+                  cex.axis = 0.88, padj = 1.6, labels = c(format(min(set1$weight[r]), 
+                    digits = 2), 0), font = 2)
+                axis(side = 2, labels = weights.label[1], at = 0.25 - 
+                  shift, padj = 1, tick = FALSE, cex.axis = 0.8)
+            }
+        }
+        if (TWO) {
+            max.weight <- max(set1$weight[r], abs(set2$weight[r2]))
+            axis(side = 2, at = c(0.5 + shift, 1 + shift), cex.axis = 0.83, 
+                labels = c(0, format(max.weight, digits = 2, 
+                  scientific = FALSE)), padj = 1.6)
+            axis(side = 2, labels = weights.label[1], at = 0.75 + 
+                shift, padj = 1, tick = FALSE, cex.axis = 0.76)
+            axis(side = 2, at = c(-0.5 - shift, -1 - shift), 
+                cex.axis = 0.83, labels = c(0, format(-max.weight, 
+                  digits = 2, scientific = FALSE)), padj = 1.6, font = 2)
+            axis(side = 2, labels = weights.label[1], at = -0.75 - 
+                shift, padj = 1, tick = FALSE, cex.axis = 0.76)
+        }
+    }
+    invisible()
+}
+```
+
+
+```{r}
+EMDLaplaceTransport_embedding <- read.csv("Transported_samples_EMDLaplaceTransport_allSubtypesAnalysis_4D.csv")
+target_PCA <- read.csv("PCA_CD44_logcounts_christine.csv")
+
+# library(ggplot2)
+# library(viridis)
+# library(ggsci)
+# library(jcolors)
+# library(cowplot)
+
+# remember to discard PC1 and PC2
+# look at expression of CDH4, ER, HER2, PGR
+
+labels <- gsub("\\.[123]","", target_PCA$X)
+labels <- gsub("(HMLER|HCC38)_","", labels)
+labels <- gsub("lo","Lo", labels)
+labels <- gsub("ZR75-1|MCF7", "luminal", labels)
+
+ggdat <- data.frame(dim1 = c(target_PCA$PC2, EMDLaplaceTransport_embedding$X0),
+                    dim2 = c(target_PCA$PC3, EMDLaplaceTransport_embedding$X1),
+                    name = c(labels, rep("TCGA", ncol(TCGA_logCPM))))
+
+
+ggplot(ggdat, aes(x=dim1, y=dim2, color= name, shape = name)) + 
+  geom_point(size=5) +
+  #scale_color_viridis_d(begin = 0.1, end = 0.7) +
+  scale_color_npg() +
+  scale_shape_manual(values = c('luminal' = 19, 'CD44Lo' = 19, "CD44Hi" = 19, "TCGA" = 3))
+
+
+
+# Identify k=30 nearest neighbours ----
+
+
+
+library(FNN) 
+
+source_data <-  target_PCA[,grep("PC[2345]", colnames(target_PCA))]
+rownames(source_data) <- target_PCA$X
+colnames(source_data) <- paste0("dim",1:4)
+
+
+
+target_data <- EMDLaplaceTransport_embedding[,-1]
+colnames(target_data) <- paste0("dim",1:4)
+rownames(target_data) <- colnames(TCGA_logCPM)
+
+
+nn <- get.knnx(query =  source_data, 
+               data =  target_data[clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal",], k = 5) 
+  
+
+dim(nn$nn.index)  
+
+nn_indices <- nn$nn.index
+rownames(nn_indices) <- target_PCA$X
+
+
+tcga_cd44lo <- as.numeric(nn_indices[grep("Lo|lo", rownames(nn_indices)),])
+tcga_cd44Hi <- as.numeric(nn_indices[grep("Hi", rownames(nn_indices)),])
+
+# watch-out for duplicates -----
+table(duplicated(tcga_cd44Hi))
+table(duplicated(tcga_cd44lo))
+
+# enrichment of DE genes in CD44 hi vs CD44 low -------
+
+#tcga_cd44lo <- tcga_cd44lo[!duplicated(tcga_cd44lo)]
+
+
+y2_tcga <- y_tcga[,clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"][,c(tcga_cd44Hi, tcga_cd44lo)]
+y2_tcga$samples$group <- c(rep("CD44Hi", length(tcga_cd44Hi)), rep("CD44Lo", length(tcga_cd44lo)))
+#y2_tcga$samples
+
+
+
+y2_tcga$samples$group <- factor(y2_tcga$samples$group)
+y2_tcga$samples$group <- relevel(y2_tcga$samples$group, ref = "CD44Lo")
+
+
+
+table(clinical_annot$subtype_BRCA_Subtype_PAM50[match(colnames(y2_tcga), clinical_annot$barcode)])
+table(y2_tcga$samples$group)
+
+#########################################
+# load DE and AR binding results-----
+#########################################
+
+ensembl <- read.delim("ensembl_results.txt", header = TRUE)
+
+
+pca <- prcomp(t(log2(y2_tcga$counts + 1)), center = TRUE, scale. = TRUE)
+PCA_TCGA <- pca$x
+
+y2_tcga$samples <- cbind(y2_tcga$samples, PCA_TCGA[, grep("PC[1234]", colnames(PCA_TCGA))])
+
+
+head(y2_tcga$samples)
+
+
+d2 <- model.matrix(~ group + PC1 + PC2 + PC3, data = y2_tcga$samples)
+
+
+head(d2)
+v2 <- voom(y2_tcga, design = d2, plot = TRUE)
+
+
+
+degs <- list("UP" = ensembl$Symbol[ensembl$isDE==1 & ensembl$logFC > 6],
+             "Down" = ensembl$Symbol[ensembl$isDE==1 & ensembl$logFC < -6])
+
+
+
+deidx <- ids2indices(degs, v2$genes$external_gene_name)
+
+fry(v2, index = deidx,
+      design = d2, contrast = 2)
+
+mroast(v2, index = deidx,
+      design = d2, contrast = 2)
+
+
+# barcode plot-----
+fit <- lmFit(v2, design = d2)
+fit <- eBayes(fit)
+summary(decideTests(fit))
+
+tp <- topTable(fit, coef =2, number = Inf, p.value = 1, sort.by = "none")
+
+barcodeplot(tp$logFC, index = degs[["UP"]], index2 = degs[["Down"]],
+            labels = c("Down in TCGA", "Up in TCGA"), xlab = "logFC",
+            main = "CD44Hi signature in TCGA BRCA samples")
+
+
+
+legend("bottomright", 
+       legend = c("Up in CD44Hi (FDR=0.0338)", "Down in CD44Hi (FDR = 0.628)"),
+       col=c("red","blue"), lty = 1, lwd = 4, cex = 1.2, box.col = "white")
+
+# kaplan meier curve for patients identified based on nearest neighbours-----
+
+basal_clinical <- clinical_annot[clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal",]
+basal_clinical$knn_label <- NA
+basal_clinical$knn_label[tcga_cd44Hi] <- "CD44Hi"
+basal_clinical$knn_label[tcga_cd44lo] <- "CD44Low"
+
+table(basal_clinical$knn_label)
+sum(basal_clinical$knn_label == "CD44Low", na.rm = TRUE)
+
+fit2 <- survfit(Surv(OS, status) ~ knn_label  , data = basal_clinical[!is.na(basal_clinical$knn_label),])
+ggsurvplot(fit2, pval = TRUE, title= "OS - BRCA TCGA primary tumours \n Basal subtype - knn approach",
+           palette =c("#DE1A1A", "navy"),
+           xlab="Days to death",
+           )
+
+#######################################################################################
+# motif search in promoter of DE genes in CD44Hi vs CD44low based on block effect model ---
+#######################################################################################
+
+
+fimo <- read.table(paste0(path, "/MEME/FIMO/fimo.tsv"), header = TRUE)
+
+table(fimo$motif_id[grep("^AR$", fimo$motif_alt_id)])
+table(fimo$motif_id[grep("^ZEB1$", fimo$motif_alt_id)])
+
+table(fimo$q.value < 0.1)
+table(grepl("^AR$", fimo$motif_alt_id) & fimo$q.value < 0.1)
+table(grepl("ZEB1", fimo$motif_alt_id) & fimo$q.value < 0.1)
+
+hist(fimo$q.value[grepl("^AR$", fimo$motif_alt_id)])
+
+fimo_ranges <- data.frame(seqname = gsub(".*(chr[0-9X]+):(.*)-(.*)","\\1", fimo$sequence_name),
+                          start = gsub(".*(chr[0-9X]+):(.*)-(.*)","\\2", fimo$sequence_name),
+                          end = gsub(".*(chr[0-9X]+):(.*)-(.*)","\\3", fimo$sequence_name))
+
+
+library(GenomicRanges)
+library(ChIPpeakAnno)
+library(biomaRt)
+
+ensembldb <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+
+fimo_ranges <- makeGRangesFromDataFrame(fimo_ranges)
+mcols(fimo_ranges) <- DataFrame(motif_id = fimo$motif_id, motif_name = fimo$motif_alt_id)
+
+
+fimo_ranges <- fimo_ranges[grep("ZEB1|^AR$", fimo_ranges$motif_name)]
+seqlevels(fimo_ranges) <- gsub("chr","", seqlevels(fimo_ranges))
+
+
+
+annoData <- biomaRt::getBM(attributes=c('chromosome_name','start_position', 'end_position' ,'strand',
+                            'ensembl_gene_id', 'external_gene_name',
+                            'gene_biotype'), mart = ensembldb)
+
+
+colnames(annoData)[1:4] <- c("seqnames", "start","end","strand")
+annoData$strand <- ifelse(annoData$strand == "1","+","-")
+
+annoData <- makeGRangesFromDataFrame(annoData, keep.extra.columns = TRUE) 
+annoData <- annoData[grep("protein_coding", annoData$gene_biotype)]
+names(annoData) <- annoData$external_gene_name
+
+
+
+
+
+fimo_annotated <- annotatePeakInBatch(fimo_ranges, AnnotationData = annoData)
+table(fimo_annotated$feature %in% ensembl$Symbol)
+
+AR_putative_target_genes <- fimo_annotated[grep("AR", fimo_annotated$motif_name)]
+table(AR_putative_target_genes$feature %in% ensembl$Symbol[ensembl$isDE==1])
+
+mean(ensembl$Symbol[ensembl$isDE==1] %in% AR_putative_target_genes$feature) # thankfully the estimate (proportion) is consistent with initial results
+
+
+ensembl$putative_AR_targets <- ifelse(ensembl$Symbol %in% AR_putative_target_genes$feature, 1,0)
+mean(ensembl$putative_AR_targets[ensembl$isDE==1] == 1)
+
+# & ensembl$logFC < -6
+
+ARgs <- list("UP" = ensembl$Symbol[(ensembl$isDE==1 & ensembl$logFC > 6) & ensembl$putative_AR_targets==1],
+             "Down" = ensembl$Symbol[(ensembl$isDE==1 & ensembl$logFC < -6) & ensembl$putative_AR_targets==1])
+
+
+ARidx <- ids2indices(ARgs, v2$genes$external_gene_name)
+
+fry(v2, index = ARidx,
+      design = d2, contrast = 2)
+
+
+
+mroast(v2, index = ARidx,
+      design = d2, contrast = 2)
+
+
+# barcode plot-----
+barcodeplot(tp$logFC, index = ARidx[["UP"]], index2 = ARidx[["Down"]],
+            labels = c("Down in TCGA", "Up in TCGA"), xlab = "logFC",
+            main = "AR driven CD44Hi-state transition signature in TCGA BRCA samples")
+
+
+
+legend("topleft", 
+       legend = c("Up in CD44Hi (FDR=0.0217)", "Down in CD44Hi (FDR = 0.785)"),
+       col=c("red","blue"), lty = 1, lwd = 4, cex = 1.2, box.col = "white")
+
+
+
+
+```
+
+
+```{r eval=FALSE}
+nn <- get.knnx(query =  source_data, 
+               data =  target_data[clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal",], k = 30) 
+  
+
+dim(nn$nn.index)  
+
+nn_indices <- nn$nn.index
+rownames(nn_indices) <- target_PCA$X
+
+
+tcga_cd44lo <- as.numeric(nn_indices[grep("Lo|lo", rownames(nn_indices)),])
+tcga_cd44Hi <- as.numeric(nn_indices[grep("Hi", rownames(nn_indices)),])
+
+# watch-out for duplicates -----
+table(duplicated(tcga_cd44Hi))
+table(duplicated(tcga_cd44lo))
+
+# enrichment of DE genes in CD44 hi vs CD44 low -------
+
+tcga_cd44lo <- tcga_cd44lo[!duplicated(tcga_cd44lo)]
+tcga_cd44Hi <- tcga_cd44Hi[!duplicated(tcga_cd44Hi)]
+
+
+
+## visualise ----
+
+labels <- gsub("\\.[123]","", target_PCA$X)
+labels <- gsub("(HMLER|HCC38)_","", labels)
+labels <- gsub("lo","Lo", labels)
+labels <- gsub("ZR75-1|MCF7", "luminal", labels)
+
+ggdat <- data.frame(dim1 = c(target_PCA$PC2, EMDLaplaceTransport_embedding$X0),
+                    dim2 = c(target_PCA$PC3, EMDLaplaceTransport_embedding$X1),
+                    name = c(labels, rep("TCGA", ncol(TCGA_logCPM))))
+
+
+ggdat$knn_label <- NA
+ggdat$knn_label[ggdat$name %in% "TCGA"][clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"][tcga_cd44lo] <- "cd44lo"
+ggdat$knn_label[ggdat$name %in% "TCGA"][clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"][tcga_cd44Hi] <- "cd44hi"
+
+
+ggdat <- cbind(ggdat, rbind(scale(t(CPM[c("ESR1","ERBB2","PGR","AR","MKI67", "CD44"),])), 
+                            scale(t(TCGA_logCPM[c("ESR1","ERBB2","PGR","AR","MKI67","CD44"),]))))
+
+
+
+
+ggdat <- reshape2::melt(ggdat, id = c("dim1","dim2", "name","knn_label"))
+
+# this is probably not a good choice --- 
+ggplot(ggdat, aes(x=dim1, y=dim2, color= name, shape = name)) + 
+  geom_point(size=5, alpha = 0.3) +
+  #scale_color_viridis_d(begin = 0.1, end = 0.7) +
+  scale_color_npg() +
+  scale_shape_manual(values = c('luminal' = 19, 'CD44Lo' = 19, "CD44Hi" = 19, "TCGA" = 3)) +
+  geom_point(data = subset(ggdat, !is.na(knn_label)), aes(color = knn_label))
+
+
+
+y2_tcga <- y_tcga[,clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"][,c(tcga_cd44Hi, tcga_cd44lo)]
+y2_tcga$samples$group <- c(rep("CD44Hi", length(tcga_cd44Hi)), rep("CD44Lo", length(tcga_cd44lo)))
+#y2_tcga$samples
+
+```
+
+
+```{r}
+
+# select samples based on svm prediction---
+head(da_svm_probs)
+
+
+tcga_cd44Hi <- order(da_svm_probs$CD44Hi[clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"], decreasing = TRUE)[1:20]
+tcga_cd44lo <- order(da_svm_probs$CD44Lo[clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"], decreasing = TRUE)[1:20]
+
+length(intersect(tcga_cd44Hi, tcga_cd44lo))
+
+y2_tcga <- y_tcga[,clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"][,c(tcga_cd44Hi, tcga_cd44lo)]
+y2_tcga$samples$group <- c(rep("CD44Hi", length(tcga_cd44Hi)), rep("CD44Lo", length(tcga_cd44lo)))
+#y2_tcga$samples
+
+
+
+y2_tcga$samples$group <- factor(y2_tcga$samples$group)
+y2_tcga$samples$group <- relevel(y2_tcga$samples$group, ref = "CD44Lo")
+
+
+
+table(clinical_annot$subtype_BRCA_Subtype_PAM50[match(colnames(y2_tcga), clinical_annot$barcode)])
+table(y2_tcga$samples$group)
+
+```
+
+```{r}
+# Melissa asked to check survival differences between the 30 patients selected in each CD44Hi and -Lo categories:
+# highProb analysis ----
+clinical_annot$highProbs <- NA
+clinical_annot$highProbs[match(colnames(y2_tcga), clinical_annot$barcode)] <- as.character(y2_tcga$samples$group)
+clinical_annot$highProbs[is.na(clinical_annot$highProbs) & clinical_annot$subtype_BRCA_Subtype_PAM50 %in% "Basal"] <- "All other Basals"
+
+
+table(clinical_annot$highProbs)
+
+# & !highProbs %in% "All other Basals"
+
+fit2 <- survfit(Surv(OS, status) ~ highProbs  , data = subset(clinical_annot, !is.na(highProbs) & (!highProbs %in% "All other Basals")))
+ggsurvplot(fit2, pval = TRUE, title= "BRCA TCGA primary tumours \nBasal subtypes selected for enrichment analysis",
+           palette =c("orange", "#DE1A1A", "navy"),
+           xlab="Days to Death",
+           )$plot + scale_color_manual(name = "",
+                          breaks = names(fit2$strata),
+                          labels = paste(gsub("highProbs=","", names(fit2$strata)), paste0("n=", fit2$strata)),
+                           #values = c("black","#FF7F00","#225E9C"),
+                          values = c("#FF7F00","#225E9C"),
+                          guide = "legend") + theme(legend.text=element_text(size=15)) + guides(colour = guide_legend(override.aes = list(size=8)))
+
+
+
+
+fit3s <- survfit(Surv(OS, status) ~ highProbs  , data = subset(clinical_annot, !is.na(highProbs) & (!highProbs %in% "CD44Lo")))
+ggsurvplot(fit3s, pval = TRUE, title= "BRCA TCGA primary tumours \nBasal subtypes selected for enrichment analysis",
+           palette =c("orange", "#DE1A1A", "navy"),
+           xlab="Days to Death",
+           )$plot + scale_color_manual(name = "",
+                          breaks = names(fit3s$strata),
+                          labels = paste(gsub("highProbs=","", names(fit3s$strata)), paste0("n=", fit3s$strata)),
+                           #values = c("black","#FF7F00","#225E9C"),
+                          values = c("#225E9C", "#FF7F00"),
+                          guide = "legend") + theme(legend.text=element_text(size=15)) +
+  guides(colour = guide_legend(override.aes = list(size=8)))
+```
+
+
+
+```{r}
+
+# remove duplicate gene entries in TCGA data
+y2_tcga <- y2_tcga[!duplicated(y2_tcga$genes$external_gene_name),]
+
+# enrichment of all genes in TCGA samples. Weight in the barcode plot denotes significance
+
+d3 <- model.matrix(~ group , data = y2_tcga$samples)
+
+head(d3)
+
+v3 <- voom(y2_tcga, design = d3, plot = TRUE)
+fit3 <- lmFit(v3, design = d3)
+fit3 <- eBayes(fit3)
+summary(decideTests(fit3))
+
+# library(edgeR)
+# 
+# y2_tcga <- estimateDisp(y2_tcga, d3)
+# 
+# fit3 <- glmFit() 
+
+
+
+tp <- topTable(fit3, coef =2, number = Inf, p.value = 1, sort.by = "none")
+
+######################################
+# Are DE genes enriched? enrichment by fry test-----
+#####################################
+
+
+# DE results as per LFQ model ---
+load("CD44Hi_vs_CD44Lo_LFQ.RData")
+
+summary(decideTestsDGE(qres))
+de.qlf <- topTags(qres, n = Inf, p.value = 0.05)$table
+
+# degs <- list("UP" = ensembl$Symbol[ensembl$isDE==1 & ensembl$logFC > 0],
+#              "Down" = ensembl$Symbol[ensembl$isDE==1 & ensembl$logFC < 0])
+# 
+# degs <- list("UP" = ensembl$Symbol[ensembl$logFC > 0],
+#              "Down" = ensembl$Symbol[ensembl$logFC < 0])
+
+
+degs <- list("UP" = de.qlf$Symbol[de.qlf$logFC > 0][1:20],
+             "Down" = de.qlf$Symbol[de.qlf$logFC < 0][1:20])
+
+
+# degs <- list("UP" = de.qlf$Symbol[de.qlf$logFC > 0],
+#              "Down" = de.qlf$Symbol[de.qlf$logFC < 0])
+
+deidx <- ids2indices(degs, v3$genes$external_gene_name)
+
+fry(v3, index = deidx,
+      design = d3, contrast = 2)
+
+mroast(v3, index = deidx,
+      design = d3, contrast = 2, nrot = 999)
+
+###################################
+# barcode plot
+#################################
+# deg.cellLine <- ensembl
+# deg.cellLine <- deg.cellLine[deg.cellLine$Symbol %in% v3$genes$external_gene_name,]
+# 
+# table(deg.cellLine$isDE)
+# 
+# deidx <- ids2indices(deg.cellLine$Symbol[deg.cellLine$isDE==1], v3$genes$external_gene_name)
+# # deidx <- ids2indices(deg.cellLine$Symbol, v3$genes$external_gene_name)
+
+# 
+# 
+# 
+# deidx <- ids2indices(degs, v3$genes$external_gene_name)
+
+
+deg.cellLine <- de.qlf[de.qlf$Symbol %in% unlist(degs),]
+
+table(deg.cellLine$Symbol %in% v3$genes$external_gene_name)
+
+deg.cellLine <- deg.cellLine[deg.cellLine$Symbol %in% v3$genes$external_gene_name,]
+
+deidx <- ids2indices(deg.cellLine$Symbol, v3$genes$external_gene_name)
+
+
+barcodeplot(tp$logFC, index = deidx[[1]], 
+             gene.weights = deg.cellLine$logFC,
+            #gene.weights = deg.cellLine$logFC,
+            weights.label =  "logFC",
+            labels = c("Down in TCGA", "Up in TCGA"), xlab = "logFC",
+            alpha = 1,
+            cex.main = 1.5,
+            cex = 5,
+            main = "CD44Hi signature in TCGA BRCA samples")
+
+
+
+# legend("bottomright", 
+#        legend = c("Up in CD44Hi (FDR=0.0338)", "Down in CD44Hi (FDR = 0.628)"),
+#        col=c("red","blue"), lty = 1, lwd = 4, cex = 1.2, box.col = "white")
+
+
+legend(x=4000,y = -1.8,
+       legend = c("P-value: 0.088"),
+       col=c("white"), lty = 1, lwd = 4, cex = 1.2, box.col = "white")
+
+
+legend(x=8000,y = 1.7,
+       legend = c("P-value: 0.028"),
+       col=c("white"), lty = 1, lwd = 4, cex = 1.2, box.col = "white")
+
+
+
+################## indirectional analysis
+de.qlf <- topTags(qres, n = Inf, p.value = 0.05)$table
+de.qlf <- de.qlf[de.qlf$Symbol %in% v3$genes$external_gene_name,]
+
+degs <- list("CD44Hi" = de.qlf$Symbol)
+
+
+deidx <- ids2indices(degs, v3$genes$external_gene_name)
+
+fry(v3, index = deidx,
+      design = d3, contrast = 2)
+
+mroast(v3, index = deidx,
+      design = d3, contrast = 2, nrot = 999)
+
+
+
+limma::barcodeplot(tp$logFC, index = deidx[[1]], 
+             gene.weights = de.qlf$logFC,
+            weights.label =  "logFC",
+            labels = c("Down in TCGA", "Up in TCGA"), xlab = "logFC",
+            alpha = 1,
+            cex.main = 1.5,
+            cex = 5,
+            main = expression("CD44Hi"^"c"~"signature in TCGA BRCA samples"))
+
+text(x=9500, y = 2.25,
+       labels = c("(PValue.Mixed= 7.7e-08)"),
+     cex = 1.2)
+
+```
+
+
+```{r AR_putative_targets}
+## testing for enrichment of AR signature in patients selected for survival analysis
+# putative AR target and measured in TCGA-------
+de.qlf <- topTags(qres, n = Inf, p.value = 0.05)$table
+## differentially expressed in cell-line and is putative AR binding -----
+de.qlf <- de.qlf[de.qlf$Symbol %in% ensembl$Symbol[ensembl$putative_AR_targets==1],]
+de.qlf <- de.qlf[de.qlf$Symbol %in% v3$genes$external_gene_name,] 
+
+
+# degs <- list("UP" = de.qlf$Symbol[de.qlf$logFC > 0][1:20],
+#              "Down" = de.qlf$Symbol[de.qlf$logFC < 0][1:20])
+
+
+# degs <- list("UP" = as.character(de.qlf$Symbol[de.qlf$logFC > 1.2]),
+#              "Down" = as.character(de.qlf$Symbol[de.qlf$logFC < -1.2]))
+
+degs <- list("UP" = de.qlf$Symbol[de.qlf$logFC > 0],
+             "Down" = de.qlf$Symbol[de.qlf$logFC < 0])
+
+
+degs <- list("Set1" = de.qlf$Symbol)
+
+deidx <- ids2indices(degs, v3$genes$external_gene_name)
+
+fry(v3, index = deidx,
+      design = d3, contrast = 2)
+
+mroast(v3, index = deidx,
+      design = d3, contrast = 2, nrot = 999)
+
+
+
+
+deg.cellLine <- de.qlf[de.qlf$Symbol %in% unlist(degs),]
+
+table(deg.cellLine$Symbol %in% v3$genes$external_gene_name)
+
+deg.cellLine <- deg.cellLine[deg.cellLine$Symbol %in% v3$genes$external_gene_name,]
+
+# deidx <- ids2indices(deg.cellLine$Symbol, v3$genes$external_gene_name)
+
+
+limma::barcodeplot(tp$logFC, index = deidx[[1]], 
+                   #index2 = deidx[[2]],
+            # gene.weights = deg.cellLine$logFC,
+            gene.weights = de.qlf$logFC,
+            #weights.label =  "logFC",
+            labels = c("Down in TCGA", "Up in TCGA"), xlab = "logFC",
+            #alpha = 3,
+            cex.main = 1.4,
+            cex = 5,
+            main = expression("AR-driven"~"CD44Hi"^"c"~"signature" ~"\nin TCGA BRCA samples"))
+
+
+
+# legend("bottomright", 
+#        legend = c("Up in CD44Hi (FDR=0.0338)", "Down in CD44Hi (FDR = 0.628)"),
+#        col=c("red","blue"), lty = 1, lwd = 4, cex = 1.2, box.col = "white")
+
+
+
+
+
+text(x=9500, y = 2.3,
+       labels = c("Pvalue = 1.79e-06"),
+     cex = 1.2)
+
+
+# text(x=17000,y = -1.9,
+#        labels = c("Pval = 1.794527e-06"),
+#        cex = 1.2)
+
+
+# 
+# 
+# text(x=17000,y = 1.85,
+#        labels =  c("Pval = 0.004"),
+#        cex = 1.2)
+
+
+```
+
+
+
+
+
+```{r}
+#######################
+# Is AR signature up-regulated?
+## AR signalling is upregulated in aggressive 44Hi subpopulations (and predicts patient poor prognosis?
+
+
+
+AR_targets <- list("AR_PUTATIVE_TARGETS" = de.qlf$Symbol[de.qlf$logFC > 1.2 | de.qlf$logFC < -1.2])
+roast(v3, index = ids2indices(AR_targets, v3$genes$external_gene_name),
+      design = d3, contrast = 2, nrot = 999)
+
+fry(v3, index = ids2indices(AR_targets, v3$genes$external_gene_name),
+      design = d3, contrast = 2, nrot = 999)
+
+limma::barcodeplot(tp$logFC,
+            index = match(AR_targets[[1]], tp$external_gene_name),
+            gene.weights = de.qlf$logFC[match(AR_targets[[1]], de.qlf$Symbol)],
+            main = expression("AR-driven"~"CD44Hi"^"c"~"signature" ~"\nin TCGA BRCA samples"),
+            alpha = 1,
+            xlab="logFC (TCGA)", weights.label = "logFC \n (CD44High)")
+
+text(x=9000,y = 2.25,
+       labels = c("Pvalue= 0.0002"),
+     cex = 1.2)
+
+
+
+##### indirectional test ---------
+AR_targets <- list("AR_PUTATIVE_TARGETS" = de.qlf$Symbol)
+roast(v3, index = ids2indices(AR_targets, v3$genes$external_gene_name),
+      design = d3, contrast = 2, nrot = 999)
+
+fry(v3, index = ids2indices(AR_targets, v3$genes$external_gene_name),
+      design = d3, contrast = 2, nrot = 999)
+
+limma::barcodeplot(tp$logFC,
+            index = match(AR_targets[[1]], tp$external_gene_name),
+            gene.weights = de.qlf$logFC[match(AR_targets[[1]], de.qlf$Symbol)],
+            main = "AR-driven CD44Hi signature \nin TCGA BRCA samples",
+            alpha = 1,
+            xlab="logFC (TCGA)", weights.label = "logFC \n (CD44High)")
+
+# text(x=17000,y = 1.7,
+#        labels = c("P-value: 0.008"),
+#      cex = 1.2)
+
+```
+
+
+
+
+
+
+```{r}
+#### Take Genes DE in TCGA and test for enrichment in cell line data
+y$samples
+
+y_tics <- y[,grep("ZR75|MCF", colnames(y), invert=TRUE)]
+y_tics <- calcNormFactors(y_tics)
+y_tics$samples$TIC_groups <- gsub("(.*)_(.*)_(.*)","\\2",y_tics$samples$group) 
+y_tics$samples$TIC_groups <- factor(y_tics$samples$TIC_groups, levels = c("CD44Lo","CD44Hi"))
+y_tics$samples
+
+dtics <- model.matrix(~ TIC_groups, data = y_tics$samples)
+head(dtics)
+v_tics <- voom(y_tics, design = dtics)
+
+# TCGA fit --------
+summary(decideTests(fit3))
+tp_tcga <- topTable(fit3, coef =2, number = Inf, p.value = 0.05)
+tp_tcga <- tp_tcga[tp_tcga$external_gene_name %in% v_tics$genes$Symbol,]
+
+
+
+
+
+
+#### directional enrichment ------
+tcga_degs <- list("UP" = tp_tcga$external_gene_name[tp_tcga$logFC > 0],
+             "Down" = tp_tcga$external_gene_name[tp_tcga$logFC < 0])
+
+
+
+deidx <- ids2indices(tcga_degs, v_tics$genes$Symbol)
+
+fry(v_tics, index = deidx,
+      design = dtics, contrast = 2)
+
+mroast(v_tics, index = deidx,
+      design = dtics, contrast = 2, nrot = 999)
+
+
+
+#### indirectional enrichment -----
+
+tcga_degs <- list("TCGA_CD44Hi" = tp_tcga$external_gene_name)
+deidx <- ids2indices(tcga_degs, v_tics$genes$Symbol)
+
+fry(v_tics, index = deidx,
+      design = dtics, contrast = 2)
+
+mroast(v_tics, index = deidx,
+      design = dtics, contrast = 2, nrot = 999)
+
+
+##### barcode enrichment plot ------
+## overall CD44 Hi -----------------
+fit_tic <- lmFit(v_tics, design = dtics)
+fit_tic <- eBayes(fit_tic)
+summary(decideTests(fit_tic))
+
+tp_tics <- topTable(fit_tic, coef = 2, number = Inf, p.value = 1, sort.by = "none")
+
+limma::barcodeplot(tp_tics$logFC,
+            index = deidx[[1]],
+            gene.weights = tp_tcga$logFC,
+            main = expression("CD44Hi"^"TCGA"~"signature in cell -line data"),
+            alpha = 1,
+            xlab="logFC", weights.label = "logFC")
+
+text(x=6300, y = 2.2,
+       labels = c("Pval= 9.16e-06"),
+     cex = 1.2)
+
+
+## AR-driven CD44Hi transition ------
+tcga_degs <- list("TCGA_CD44Hi" = tp_tcga$external_gene_name[tp_tcga$external_gene_name %in% ensembl$Symbol[ensembl$putative_AR_targets == 1]])
+deidx <- ids2indices(tcga_degs, v_tics$genes$Symbol)
+
+
+fry(v_tics, index = deidx,
+      design = dtics, contrast = 2)
+
+mroast(v_tics, index = deidx,
+      design = dtics, contrast = 2, nrot = 999)
+
+
+limma::barcodeplot(tp_tics$logFC,
+            index = deidx[[1]],
+            alpha = 1, 
+            gene.weights = tp_tcga$logFC[match(tcga_degs[[1]], tp_tcga$external_gene_name)],
+            main = expression("AR-driven CD44Hi"^"TCGA"~"signature in cell -line data"),
+            xlab="logFC", weights.label = "logFC")
+
+text(x=6300, y = 2.2,
+       labels = c("Pval= 1.48e-05"),
+     cex = 1.2)
+
+
+# plot levels of CD44 low
+cd44 <- grep("CD44$", v3$genes$external_gene_name)
+
+CPM_tcga <- cpm(v3)
+CPM_tcga <- CPM_tcga/rowMax(CPM_tcga)
+
+
+barplot(CPM_tcga[cd44,], col = c("blue","orange")[as.factor(y2_tcga$samples$group)])
+
+
+ggdat <- data.frame(expression = CPM_tcga[cd44,],
+                    group = y2_tcga$samples$group)
+
+
+ggplot(ggdat, aes(x= group, y = expression)) +
+  geom_boxplot()
+
+```
+
+
+
+```{r}
+# logFC-logFC of putative AR target genes in cell-line and TCGA data + functional enrichment
+
+library(ggrepel)
+
+tp_tcga <- topTable(fit3, coef =2, number = Inf, p.value = 1)
+
+ensembl$InTCGA <- ifelse(ensembl$Symbol %in% tp_tcga$external_gene_name, 1, 0)
+
+table(ensembl$InTCGA)
+table(ensembl$InTCGA & ensembl$putative_AR_targets)
+
+
+ensembl$TCGA_logFC <- tp_tcga$logFC[match(ensembl$Symbol, tp_tcga$external_gene_name)]
+ensembl$TCGA_adjPval <- tp_tcga$adj.P.Val[match(ensembl$Symbol, tp_tcga$external_gene_name)]
+ensembl$TCGA_isDE <- ifelse(ensembl$TCGA_adjPval < 0.05, 1, 0)
+ensembl$deState <- "not significant"
+ensembl$deState[ensembl$isDE==1] <- "DE in cell-line"
+ensembl$deState[ensembl$TCGA_isDE==1] <- "DE in TCGA"
+ensembl$deState[ensembl$isDE == 1 & ensembl$TCGA_isDE==1] <- "DE in both"
+ensembl$status <- ifelse(ensembl$deState %in% "DE in both", "DE in both", "other")
+
+
+ggdat <- subset(ensembl, putative_AR_targets == 1)
+#ggdat <- ensembl
+
+
+# number of DE in both genes in each quadrant
+m <- subset(ensembl, putative_AR_targets == 1)
+k1 <- (m$logFC[m$deState %in% "DE in both"] >0)
+k2 <- (m$TCGA_logFC[m$deState %in% "DE in both"] >0)
+
+q1 <- sum(k1&k2)
+q2 <- sum(k2&!k1)
+q3 <- sum(!k1 & !k2)
+q4 <- sum(k1 & !k2)
+
+ggplot(ggdat, aes(x=logFC, y = TCGA_logFC, 
+                                                      #color = deState,
+                                                      color = status,
+                                                      label = Symbol)) +
+  geom_point(data = subset(ggdat, status == "other"), alpha = 1, color="gray82") +
+  geom_point(data = subset(ggdat, status != "other"), color="#DC0000FF") + 
+  
+  scale_color_manual(values = c("other" = "gray60", "DE in both" = "#DC0000FF")) +
+  #scale_color_jama() +
+  geom_vline(xintercept = 0, linetype="dashed", color = "#DF8F44FF", size = 0.9) +
+  geom_hline(yintercept = 0, linetype="dashed", color = "#DF8F44FF", size = 0.9) + 
+  annotate("text", x=c(8, -9, -9, 8), y = c(3.5, 3.5, -1.2, -1.2), label = paste("n=", c(q1,q2,q3,q4), sep = ""),
+           fontface = "bold", size = 6) +
+  geom_text_repel(data = subset(ggdat, (putative_AR_targets == 1) & (deState %in% "DE in both")), 
+                  color = "black", max.overlaps = 50) +
+  labs(y= expression("logFC"~"CD44Hi"^"TCGA"), x =  expression("logFC"~"CD44Hi"^"Cell-line"),
+       title = "AR putative targets") + theme(axis.title.x = element_text(size=18),
+                                              axis.title.y = element_text(size=18)) +
+  theme_cowplot()
+
+
+
+```
+
+
+
+```{r}
+
+###########
+### KEGG
+#########
+
+kegg_hs <- getGeneKEGGLinks("hsa")
+mDE <- m[m$isDE == 1,]
+
+# enrichment for concordant genes and discordant genes ------
+# C1 <- (ensembl$deState %in% "DE in both" & ensembl$logFC > 0 & ensembl$TCGA_logFC > 0)
+# C3 <- (ensembl$deState %in% "DE in both" & ensembl$logFC < 0 & ensembl$TCGA_logFC < 0)
+# 
+# 
+# C4 <- (ensembl$deState %in% "DE in both" & ensembl$logFC > 0 & ensembl$TCGA_logFC < 0)
+# C2 <- (ensembl$deState %in% "DE in both" & ensembl$logFC < 0 & ensembl$TCGA_logFC > 0)
+# 
+# topKEGG(kegga(ensembl$GeneID[C1|C3]))
+# topKEGG(kegga(ensembl$GeneID[C2|C4]))
+
+
+## concordant up
+C1 <- (m$deState %in% "DE in both" & m$logFC > 0 & m$TCGA_logFC > 0)
+c1_df <- topKEGG(kegga(m$GeneID[C1]))
+
+for (i in seq_len(nrow(c1_df))){
+  ids <- unique(kegg_hs$GeneID[kegg_hs$PathwayID == rownames(c1_df)[i]])
+  ids <- ids[ids %in% m$GeneID[C1]]
+  genes <- m$Symbol[m$GeneID %in% ids]
+  #print(genes)
+  c1_df$genes[i] <-  paste(as.character(genes), collapse = ",")
+}
+
+
+
+
+
+
+## concordant down
+C3 <- (m$deState %in% "DE in both" & m$logFC < 0 & m$TCGA_logFC < 0)
+
+
+c3_df <-topKEGG(kegga(m$GeneID[C3]))
+c3_df <- c3_df[c3_df$P.DE < 1,]
+
+for (i in seq_len(nrow(c3_df))){
+  ids <- unique(kegg_hs$GeneID[kegg_hs$PathwayID == rownames(c3_df)[i]])
+  ids <- ids[ids %in% m$GeneID[C3]]
+  genes <- m$Symbol[m$GeneID %in% ids]
+  #print(genes)
+  c3_df$genes[i] <-  paste(as.character(genes), collapse = ",")
+}
+
+
+
+
+## discordant
+C4 <- (m$deState %in% "DE in both" & m$logFC > 0 & m$TCGA_logFC < 0)
+C2 <- (m$deState %in% "DE in both" & m$logFC < 0 & m$TCGA_logFC > 0)
+discord_df <- topKEGG(kegga(m$GeneID[C2|C4]))
+
+
+for (i in seq_len(nrow(discord_df))){
+  ids <- unique(kegg_hs$GeneID[kegg_hs$PathwayID == rownames(discord_df)[i]])
+  ids <- ids[ids %in% m$GeneID[C2|C4]]
+  genes <- m$Symbol[m$GeneID %in% ids]
+  #print(genes)
+  discord_df$genes[i] <-  paste(as.character(genes), collapse = ",")
+}
+
+
+###########
+### GO
+###########
+
+library(org.Hs.eg.db)
+
+GO1 <- topGO(goana(m$GeneID[C1], species = "Hs"), number = 20, ontology = "BP")
+
+for (i in seq_len(nrow(GO1))){
+  ids <- select(org.Hs.eg.db, keys = rownames(GO1)[i], keytype = "GOALL", columns = "ENTREZID")$ENTREZID
+  ids <- ids[ids %in% m$GeneID[C1]]
+  genes <- m$Symbol[m$GeneID %in% ids]
+  #print(genes)
+  GO1$genes[i] <-  paste(as.character(genes), collapse = ",")
+}
+
+
+
+
+
+
+GO3 <- topGO(goana(m$GeneID[C3]), number = 20, ontology = "BP")
+
+for (i in seq_len(nrow(GO3))){
+  ids <- select(org.Hs.eg.db, keys = rownames(GO3)[i], keytype = "GOALL", columns = "ENTREZID")$ENTREZID
+  ids <- ids[ids %in% m$GeneID[C3]]
+  genes <- m$Symbol[m$GeneID %in% ids]
+  #print(genes)
+  GO3$genes[i] <-  paste(as.character(genes), collapse = ",")
+}
+
+
+
+
+GO_discord <- topGO(goana(m$GeneID[C2|C4]), number=20, ontology = "BP")
+
+
+for (i in seq_len(nrow(GO_discord))){
+  ids <- select(org.Hs.eg.db, keys = rownames(GO_discord)[i], keytype = "GOALL", columns = "ENTREZID")$ENTREZID
+  ids <- ids[ids %in% m$GeneID[C2|C4]]
+  genes <- m$Symbol[m$GeneID %in% ids]
+  #print(genes)
+  GO_discord$genes[i] <-  paste(as.character(genes), collapse = ",")
+}
+
+
+
+```
+
+```{r eval=FALSE}
+library(xlsx)
+
+write.xlsx(c1_df, file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "KEGG concordant up")
+
+
+write.xlsx(c3_df, file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "KEGG concordant down", append = TRUE)
+
+write.xlsx(discord_df, file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "KEGG discordant genes", append = TRUE)
+
+
+
+
+write.xlsx(GO1, 
+           file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "GO concordant up", append=TRUE)
+
+
+write.xlsx(GO3, 
+           file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "GO concordant down", append = TRUE)
+
+write.xlsx(GO_discord, 
+           file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "GO discordant genes", append = TRUE)
+
+```
+
+
+```{r}
+# Differential expression between CD44hi- CD44lo patients and AR component of the signature
+d2 <- model.matrix(~ group, data = y2_tcga$samples)
+head(d2)
+
+vd2 <- voom(y2_tcga, design = d2)
+fitvd2 <- lmFit(vd2, d2)
+fitvd2 <- eBayes(fitvd2)
+summary(decideTests(fitvd2))
+
+tp <- topTable(fitvd2, coef = ncol(d2), number = Inf, p.value = 0.05, lfc = log2(2))
+tp$is_AR_putative_target <- ifelse(tp$external_gene_name %in% ensembl$Symbol[ensembl$putative_AR_targets==1], 1, 0)
+
+table(tp$is_AR_putative_target)
+#dim(de.qlf)
+
+#write.table(tp, file = "DEG_TCGA_Cd44Hivslo_sig_plus_AR_component.csv", row.names = FALSE)
+
+```
+
+Similarity to AR signature in other sample context
+```{r}
+
+
+## AR in TNBC BRCA context
+# undirectional
+lar_lehman <- read.csv("LAR_signature_Lehman2011.csv")
+lar_lehman <- as.character(lar_lehman$GENE[lar_lehman$Bonferonni.p.value < 0.05])
+lar_lehman <- list("LAR_LEHMAN_TNBC" = lar_lehman)
+
+library(xlsx)
+
+tables <- c("S3a", "S3b", "S3c")
+
+
+
+### AR in ER+ BRCA context
+# directional
+er_pos_brca <- list("AR_ER_POSITIVE_BRCA_HICKEY_UP" = vector("character"),
+                    "AR_ER_POSITIVE_BRCA_HICKEY_DOWN" = vector("character"))
+
+
+
+tbl <- as.data.frame(read.xlsx("AR_genesets/Supplementary_Table_3_Hickey.xlsx", sheetName = tables[1], startRow = 2))
+
+er_pos_brca[["AR_ER_POSITIVE_BRCA_HICKEY_UP"]] <- tbl$Symbol[tbl$Fold.change >0 & tbl$Adjusted.P.value < 0.05]
+  
+er_pos_brca[["AR_ER_POSITIVE_BRCA_HICKEY_DOWN"]] <- tbl$Symbol[tbl$Fold.change < 0 & tbl$Adjusted.P.value < 0.05]
+
+
+
+
+for( i in tables[-1]){
+  tbl <- as.data.frame(read.xlsx("AR_genesets/Supplementary_Table_3_Hickey.xlsx", sheetName = i, startRow = 2))
+  
+  er_pos_brca[["AR_ER_POSITIVE_BRCA_HICKEY_UP"]] <- intersect(er_pos_brca[["AR_ER_POSITIVE_BRCA_HICKEY_UP"]],
+                                                          tbl$Symbol[tbl$Fold.change >0 & tbl$Adjusted.P.value < 0.05])
+  
+   er_pos_brca[["AR_ER_POSITIVE_BRCA_HICKEY_DOWN"]] <- intersect(er_pos_brca[["AR_ER_POSITIVE_BRCA_HICKEY_DOWN"]],
+                                                          tbl$Symbol[tbl$Fold.change < 0 & tbl$Adjusted.P.value < 0.05])
+}
+
+
+## AR in Prostate Cancer
+
+# LNCaP cells (prostate cancer)
+
+ar_prostate <- read.delim("AR_genesets/Androgen_response_genesets.gmx")
+ar_prostate <- as.list(ar_prostate)
+#lapply(ar_prostate, function(x) x[1])
+
+# Genes down-regulated in LNCaP cells (prostate cancer) in response to synthetic androgen R1881
+prostate_gs <- c("NELSON_RESPONSE_TO_ANDROGEN_DN",
+                 "NELSON_RESPONSE_TO_ANDROGEN_UP",
+                 "Wang_LNCaP_DHT_up",
+                 "Wang_LNCaP_DHT_down",
+                 "WANG_RESPONSE_TO_ANDROGEN_UP"
+                 )
+
+
+ar_prostate <- lapply(ar_prostate, function(x) {x <- x[-1]; as.character(x[x!=""])})
+ar_prostate <- ar_prostate[prostate_gs]
+
+
+
+ar_in_cancer_gs <- c(lar_lehman, er_pos_brca, ar_prostate)
+
+
+
+hypergeom_test <- function(de, index){
+  
+  # Universe defaults to all annotated genes
+  universe <- unlist(index)
+  universe <- universe[!duplicated(universe)]
+  NGenes <- length(universe)
+  nde <- length(de)
+  
+  pathways <- names(index)
+  
+  de <- de[de %in% universe]
+  # Restrict DE genes to universe
+  
+  # Restrict pathways to universe
+  
+  nsets <- 1 # only a single character vector
+  PValue <- matrix(0,nrow=length(index),ncol=nsets)
+  N <-  matrix(0,nrow=length(index),ncol=nsets)
+  DE <-  matrix(0,nrow=length(index),ncol=nsets)
+  
+  for (i in seq_len(length(index))){
+  pathway <- index[[i]]
+  pathway <- unique(pathway)
+  n <- length(pathway)
+  N[i,] <- n
+  
+  
+  # S : the number of de genes overalp with the pathway
+  S <- sum(pathway %in% de)
+  DE[i,] <- S
+  
+  PValue[i,] <- phyper(sum(pathway %in% de)-0.5, nde, NGenes, n, lower.tail=FALSE)
+}
+
+  return(data.frame(Pathway = pathways, N = N, DE = DE, P.DE = PValue))
+}
+
+
+## testing for concordant/discordant genes -----
+# conconrdant up
+hypergeom_test(as.character(m$Symbol[C1]), ar_in_cancer_gs)
+
+
+# concordant down
+hypergeom_test(as.character(m$Symbol[C3]), ar_in_cancer_gs)
+
+
+# discordant
+hypergeom_test(as.character(m$Symbol[C2|C4]), ar_in_cancer_gs)
+
+
+
+
+
+######
+gene.pathway <- data.frame(GeneID=unlist(ar_in_cancer_gs))
+gene.pathway$pathway_id <- gsub("(.*[A-z])([0-9]+)","\\1", rownames(gene.pathway))
+
+
+pathway.names <- data.frame(pathway_id = gene.pathway$pathway_id, pathway_name=gene.pathway$pathway_id)
+
+
+
+res_c1 <- kegga(as.character(m$Symbol[C1]),
+             gene.pathway = gene.pathway,
+             pathway.names = pathway.names)
+
+
+
+res_c3 <- kegga(as.character(m$Symbol[C3]),
+             gene.pathway = gene.pathway,
+             pathway.names = pathway.names)
+
+
+
+res_discord <- kegga(as.character(m$Symbol[C2|C4]),
+             gene.pathway = gene.pathway,
+             pathway.names = pathway.names)
+
+```
+
+```{eval=FALSE}
+write.xlsx(res_c1, 
+           file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "AR pathways in concordant up genes", append = TRUE)
+
+write.xlsx(res_c3, 
+           file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "AR pathways in concordant dwn genes", append = TRUE)
+
+write.xlsx(res_discord, 
+           file = "KEGG_GO_enrichment_on_AR_putative_targets_24022021.xlsx",
+           row.names = TRUE, sheetName = "AR targets in discordant genes", append = TRUE)
+```
+
+Is Lehman LAR signature enriched in 60 TCGA samples selected by the method?
+```{r}
+idx <- ids2indices(ar_in_cancer_gs, vd2$genes$external_gene_name)
+head(d2) 
+fry_tbl <- fry(vd2$E, index = idx, design = d2)
+
+
+# write.csv(fry_tbl, file="fry_test_enrichment_of_AR_cancer_signatures_in_cd44hiLike_TCGA_samples.csv", quote = FALSE, row.names=TRUE)
+
+
+tp <- topTable(fitvd2, coef = ncol(d2), number = Inf, p.value = 1, sort.by = "none")
+
+limma::barcodeplot(tp$logFC,
+                   index = idx[["LAR_LEHMAN_TNBC"]], 
+             #gene.weights = de.qlf$logFC,
+            #weights.label =  "logFC",
+            labels = c("Down in TCGA", "Up in TCGA"), xlab = "logFC",
+            alpha = 1,
+            cex.main = 1.5,
+            cex = 1,
+            # "Lehman LAR signature in CD44hi-like TCGA samples "
+            main = expression("Lehman LAR signature in"~"CD44"^"High"~"-like TCGA samples"))
+
+text(x=9500, y = 2.1,
+       labels = c("(PValue= 0.998)"),
+     cex = 1.2)
+
+
+
+# enrichment of generic AR signature in cellline data
+
+load("CD44Hi_vs_CD44Lo_LFQ.RData")
+
+summary(decideTestsDGE(qres))
+ts <- topTags(qres, n = Inf, p.value = 1, sort.by = "none")$table
+
+ar_prostate <- read.delim("AR_genesets/Androgen_response_genesets.gmx")
+ar_prostate <- as.list(ar_prostate)
+ar_prostate <- lapply(ar_prostate, function(x) {x <- x[-1]; as.character(x[x!=""])})
+
+idx_in_celllines <- ids2indices(ar_prostate, ts$Symbol)
+
+y_cd44 <- y[, grep("CD44", y$samples$group)]
+cd44group <- factor(gsub("(.*)_(.*)_(.*)","\\2", y_cd44$samples$group), levels = c("CD44Lo", "CD44Hi"))
+cellline <- factor(gsub("(.*)_(.*)_(.*)","\\1", y_cd44$samples$group))
+
+dc44 <- model.matrix(~ cellline + cd44group)
+dc44
+
+vcd44 <- voom(y_cd44, dc44)
+fitcd44 <- lmFit(vcd44, dc44)
+fitcd44 <- eBayes(fitcd44)
+summary(decideTests(fitcd44))
+
+res_cd44 <- topTable(fitcd44, coef = ncol(dc44), number = Inf, sort.by = "none")
+
+all(ts$Symbol == vcd44$genes$Symbol)
+
+idx_in_celllines <- ids2indices(ar_prostate["GO_ANDROGEN_RECEPTOR_SIGNALING_PATHWAY"], res_cd44$Symbol)
+
+fry(vcd44, index = idx_in_celllines, design = dc44)
+
+
+
+limma::barcodeplot(res_cd44$logFC,
+                   index = idx_in_celllines[[1]], 
+             #gene.weights = de.qlf$logFC,
+            #weights.label =  "logFC",
+            labels = c("Down in CD44Hi celllines", "Up in CD44Hi celllines"), xlab = "logFC",
+            alpha = 1,
+            cex.main = 1.5,
+            cex = 1,
+            main = "GO - ANDROGEN RECEPTOR SIGNALING PATHWAY")
+
+
+text(x=9800, y = 2.1,
+       labels = c("(PValue= 0.0676)"),
+     cex = 1.2)
+
+
+#  Can we add more terms and get significance at 5%?
+
+idx_in_celllines <- ids2indices(unique(AR_go_list$external_gene_name), res_cd44$Symbol)
+
+fry(vcd44, index = idx_in_celllines, design = dc44)
+
+
+
+limma::barcodeplot(res_cd44$logFC,
+                   index = idx_in_celllines[[1]], 
+             #gene.weights = de.qlf$logFC,
+            #weights.label =  "logFC",
+            labels = c("Down in CD44Hi celllines", "Up in CD44Hi celllines"), xlab = "logFC",
+            alpha = 1,
+            cex.main = 1.5,
+            cex = 1,
+            main = "Androgen receptor signaling")
+
+
+text(x=1900, y = 2.,
+       labels = c("(PValue= 0.0.0024)"),
+     cex = 1.2)
+```
+

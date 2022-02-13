@@ -1,0 +1,1177 @@
+\documentclass{article}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\section{Sample description}
+\begin{small}
+<<>>=
+options(width=120)
+library(edgeR)
+library(limma)
+library(RUVSeq)
+library(gplots)
+library(ggplot2)
+library(VennDiagram)
+
+path <- "/stornext/General/data/academic/lab_davis/christine_data"
+
+sample_annot <- read.csv(paste0(path,"/sample_table.csv"))
+
+sample_annot <- sample_annot[,-c(5:7,10)]
+
+sample_annot
+@
+\end{small}
+
+
+<<>>=
+load(paste0(path,"/counts_fr.RData"))
+y <- DGEList(counts = counts_fr$counts, genes = counts_fr$annotation)
+
+annot.path <- "/stornext/General/data/academic/lab_davis/genomes/DATA"
+
+annot <- read.delim(paste0(annot.path,"/Homo_sapiens.gene_info"), header = FALSE, skip = 1)[,-1]
+colnames(annot) <- c("GeneID", "Symbol", "LocusTag", "Synonyms", 
+                     "dbXrefs","Chromosome", "map_location","description",
+                     "type_of_gene","Symbol_from_nomenclature_authority",
+                     "Full_name_from_nomanclature_authority", 
+                     "Numenclature_status","Other_destignations","Modification_date")
+
+
+idx <- match(rownames(y), annot$GeneID)
+
+y <- y[which(!is.na(idx)),]
+
+
+
+idx <- idx[!is.na(idx)]
+
+gene_lengths <- y$genes$Length
+
+y$genes <- annot[idx,]
+y$genes$Length <- gene_lengths
+@
+
+In the following section we remove genes with no annotation, or genes with counts per million (cpm) less than 0.5 in less than 3 samples.
+
+<<>>=
+sample_annot$Sample <- gsub("170223_BSF--","",sample_annot$Sample)
+samplenames <- gsub("BAM_files.CB00GANXX_[12]_170223_BSF\\.\\.([[:digit:]]+)_Human.*","\\1",colnames(y))
+
+col.idx <- match(sample_annot$Sample, samplenames)
+
+y <- y[,col.idx]
+colnames(y) <- sample_annot$cell
+
+TIC_nonTic <- as.factor(ifelse(grepl("TICs",sample_annot$cond),"TIC","nonTIC"))
+
+
+y$samples$group <- as.factor(paste(gsub("\\.[123]","", rownames(y$samples)), TIC_nonTic,sep="_"))
+
+y$samples$group <- gsub("lo","Lo", y$samples$group)
+
+keep <- rowSums(cpm(y) > 0.5) >= 3
+table(keep)
+
+
+y <- y[keep,, keep.lib.sizes = FALSE]
+dim(y)
+
+y <- calcNormFactors(y)
+y$samples
+@
+
+
+<<>>=
+CPM_HMLER <- cpm(y[,grep("HMLER_CD44Hi_TIC|HMLER_CD44Lo_nonTI", y$samples$group)],
+                    log=TRUE, prior.count = 2)
+
+CPM_HCC38 <- cpm(y[,grep("HCC38_CD44Hi_TIC|HCC38_CD44Lo_nonTI", y$samples$group)],
+                    log=TRUE, prior.count = 2)
+
+
+
+library(PMA)
+
+
+# correlation with ZEB1, or with the observed phenotype?
+## we began by finding correlations between observed phenotype ---
+
+# peerm.out <- CCA.permute(x = t(CPM_HMLER),
+#               z = t(CPM_HCC38),
+#                typex = "standard", typez = "standard",
+#                nperms=10, penaltyxs=seq(.02,.7,len=10),
+#               outcome=  "multiclass", y = as.numeric(as.factor(c("nonTIC","nonTIC","nonTIC","TIC","TIC","TIC")))
+# 
+#               )
+# 
+# 
+# print(peerm.out)
+# plot(peerm.out)
+# save(peerm.out, file="peerm.out.RData")
+
+
+
+load("peerm.out.RData")
+out <- CCA(
+  x = t(CPM_HMLER),
+  z = t(CPM_HCC38),
+  typex = "standard", typez = "standard", 
+   K=3, 
+  penaltyx= 0.7, v=peerm.out$v.init, penaltyz= 0.7,
+  outcome=  "multiclass", y = as.numeric(as.factor(c("nonTIC","nonTIC","nonTIC","TIC","TIC","TIC")))
+  )
+                                         
+                                         
+                                         
+str(out)
+
+
+
+
+sum(out$u[,1] != 0)
+sum(out$v[,1] != 0)
+
+
+sum(out$u[,2] != 0)
+sum(out$v[,2] != 0)
+
+
+sum(out$u[,3] != 0)
+sum(out$v[,3] != 0)
+
+annot <- y$genes[,-c(3:7, 10:16)]
+
+CC1_hmler <- cbind(annot[out$u[,1] != 0 | out$v[,1] != 0 ,], factor = (out$u[,1] * out$v[,1])[out$u[,1] != 0 | out$v[,1] != 0])
+CC1_hmler <- CC1_hmler[order(abs(CC1_hmler$factor), decreasing = TRUE),]
+
+dim(CC1_hmler)
+
+
+CC1_HMLER <- cbind(annot[out$u[,1] != 0 ,], factor = out$u[,1][out$u[,1] != 0])
+CC1_HMLER$Rank <- rank(-abs(CC1_HMLER$factor), ties.method = "average")
+CC1_HMLER <- CC1_HMLER[order(abs(CC1_HMLER$factor), decreasing = TRUE),]
+CC1_HMLER$Direction <- sign(CC1_HMLER$factor)
+
+
+CC1_HCC38 <- cbind(annot[out$v[,1] != 0, ], factor= out$v[,1][out$v[,1] != 0])
+CC1_HCC38$Rank <- rank(-abs(CC1_HCC38$factor), ties.method = "average")
+CC1_HCC38 <- CC1_HCC38[order(abs(CC1_HCC38$factor), decreasing = TRUE),]
+CC1_HCC38$Direction <- sign(CC1_HCC38$factor)
+
+CC1_basals <- cbind(annot[out$u[,1] != 0 | out$v[,1] != 0 ,], 
+                   AveRankBD = rowMeans(cbind(rank(-abs(out$u[,1]), ties.method = "average"),
+                                            rank(-abs(out$v[,1]), ties.method = "average")))[out$u[,1] != 0 | out$v[,1] != 0],
+                   CBD = (sign(out$u[,1]) * sign(out$v[,1]))[out$u[,1] != 0 | out$v[,1] != 0],
+                   Direction_DB1 = sign(out$u[,1])[out$u[,1] != 0 | out$v[,1] != 0],
+                   Direction_DB2 = sign(out$v[,1])[out$u[,1] != 0 | out$v[,1] != 0])
+
+
+CC1_basals <- CC1_basals[order(CC1_basals$AveRankBD),]
+
+
+CC1_commonToBasals <- cbind(annot[out$u[,1] != 0 & out$v[,1] != 0 ,], 
+                   AveRankBD = rowMeans(cbind(rank(-abs(out$u[,1]), ties.method = "average"),
+                                            rank(-abs(out$v[,1]), ties.method = "average")))[out$u[,1] != 0 & out$v[,1] != 0],
+                   CBD = (sign(out$u[,1]) * sign(out$v[,1]))[out$u[,1] != 0 & out$v[,1] != 0],
+                   Direction_DB1 = sign(out$u[,1])[out$u[,1] != 0 & out$v[,1] != 0],
+                   Direction_DB2 = sign(out$v[,1])[out$u[,1] != 0 & out$v[,1] != 0])
+
+
+CC1_commonToBasals <- CC1_commonToBasals[order(CC1_commonToBasals$AveRankBD),]
+
+
+
+
+
+# separate the list based on ZEB1 sign/direction, then do gene set enrichment
+ZEB1_concordant_CC1 <- CC1_basals[CC1_basals$Direction_DB1 > 0 & CC1_basals$Direction_DB2 > 0 ,]
+
+ZEB1_discordant_CC1 <- CC1_basals[!(CC1_basals$Direction_DB1 > 0 & CC1_basals$Direction_DB2 > 0) ,]
+
+
+
+dim(ZEB1_concordant_CC1)
+dim(ZEB1_discordant_CC1)
+
+y_basal <- calcNormFactors(y[,grep("(HMLER|HCC38)_CD44Hi_TIC|(HMLER|HCC38)_CD44Lo_nonTI", y$samples$group)])
+
+Cellline <- as.factor(gsub("(.*)_([CD44|104].*)?[TIC|non].*","\\1",y_basal$samples$group))
+Cellline <- relevel(Cellline, ref="HCC38")
+
+
+marker <- gsub("(.*)_([CD44|104].*)(_[TIC|non].*)","\\2",y_basal$samples$group)
+marker <- gsub("CD44Hi","CD44Hi.104x", marker)
+marker <- as.factor(marker)
+marker <- relevel(marker, ref="CD44Lo")
+
+
+design <- model.matrix(~ marker)
+
+design
+
+
+
+corfit <- duplicateCorrelation(cpm(y_basal, prior.count = 2, log=TRUE), 
+                               block = Cellline, design = design)
+
+
+v <- voom(y_basal, design = design,
+          block=Cellline, correlation=corfit$consensus.correlation)
+
+fit <- lmFit(v, design = design, block = Cellline, correlation = corfit$consensus.correlation)
+fit <- eBayes(fit)
+summary(decideTests(fit))
+
+@
+
+Motif analysis: need to create a bed file of all genes, ordered by pvalue
+<<>>=
+library(rtracklayer)
+library(biomaRt)
+
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+annot_gr <- biomaRt::getBM(attributes=c('chromosome_name','start_position', 'end_position' ,'strand',
+                            'ensembl_gene_id', 'external_gene_name',
+                            'gene_biotype','description'), mart = ensembl)
+
+
+annot_gr$chromosome_name <- paste0("chr", annot_gr$chromosome_name)
+colnames(annot_gr)[1:4] <- c("seqnames", "start","end","strand")
+annot_gr$strand <- ifelse(annot_gr$strand == "1","+","-")
+
+annot_gr <- makeGRangesFromDataFrame(annot_gr, keep.extra.columns = TRUE) 
+
+tp_gr <- topTable(fit, coef = 2, number = Inf)
+all_genes_input <- annot_gr[annot_gr$external_gene_name %in% tp_gr$Symbol]
+all_genes_input <- keepStandardChromosomes(all_genes_input, pruning.mode = "coarse")
+sum(tp_gr$Symbol[tp_gr$adj.P.Val < 0.05] %in% all_genes_input$external_gene_name)
+length(tp_gr$Symbol[tp_gr$adj.P.Val < 0.05])
+tp_gr$Symbol[tp_gr$adj.P.Val < 0.05][!tp_gr$Symbol[tp_gr$adj.P.Val < 0.05] %in% all_genes_input$external_gene_name]
+
+all_genes_input$name <- all_genes_input$external_gene_name
+export.bed(all_genes_input, con="inputSeq_allgenes.bed")
+
+dim(tp_gr)
+tp_tbl_gr_inputSeq <- annot_gr[annot_gr$external_gene_name %in% tp_gr$Symbol[tp_gr$adj.P.Val < 0.05]]
+tp_tbl_gr_inputSeq <- keepStandardChromosomes(tp_tbl_gr_inputSeq, pruning.mode = "coarse")
+
+
+tp_tbl_gr_controlSeq <- annot_gr[annot_gr$external_gene_name %in% tp_gr$Symbol[order(tp_gr$adj.P.Val, decreasing = TRUE)][1:8000]]
+tp_tbl_gr_controlSeq <- keepStandardChromosomes(tp_tbl_gr_controlSeq, pruning.mode = "coarse")
+
+
+## order the rows based on pvalue
+tp_gr <- tp_gr[tp_gr$Symbol %in% tp_tbl_gr_inputSeq$external_gene_name,]
+tp_tbl_gr_inputSeq <- tp_tbl_gr_inputSeq[match(tp_gr$Symbol, tp_tbl_gr_inputSeq$external_gene_name)]
+
+
+
+# export.bed(tp_tbl_gr_inputSeq, con="DEG_CD44HivsCD44lo_CelllineIndep_inputSeq.bed")
+# export.bed(tp_tbl_gr_controlSeq, con="DEG_CD44HivsCD44lo_CelllineIndep_controlSeq.bed")
+
+## Alternatively, generate 2 sets of input and control sequences:
+
+
+## CCA genes as the input and the control set the sequences used above:
+dim(CC1_basals)
+sum(CC1_basals$Symbol %in% tp_tbl_gr_controlSeq$external_gene_name)
+
+tp_tbl_gr_controlSeq2 <- tp_tbl_gr_controlSeq[!tp_tbl_gr_controlSeq$external_gene_name %in% CC1_basals$Symbol]
+
+CC1_gr <- annot_gr[annot_gr$external_gene_name %in% CC1_basals$Symbol]
+CC1_gr <- keepStandardChromosomes(CC1_gr, pruning.mode = "coarse")
+
+
+# export.bed(CC1_gr, con="DEG_CD44HivsCD44lo_CelllineIndep_inputSeq_CCA.bed")
+# export.bed(tp_tbl_gr_controlSeq2, con="DEG_CD44HivsCD44lo_CelllineIndep_controlSeq_CCA.bed")
+@
+
+Processing motif scanning results:
+<<>>=
+AR_signature <- read.csv("AR_sig_MVCorrMethod_CD44HivsCD44Lo_HCC38.csv")
+
+motifs <- read.table("MEME/FIMO_all/fimo.tsv", header = TRUE)
+
+# before getting to start to worry about the significance of the sites
+motifs$adj.P.Val <- p.adjust(motifs$p.value, method = "fdr")
+sum(motifs$q.value < 0.05)
+sum(motifs$adj.P.Val < 0.05)
+
+# only retain 1 binsing site (the most significant adj.P.Val)
+library(dplyr)
+motif_tbl <- tbl_df(motifs)
+
+motifs_filtered <- motif_tbl %>% group_by(motif_id,motif_alt_id,sequence_name) %>% summarise(min(adj.P.Val))
+motifs_filtered <- as.data.frame(motifs_filtered)
+table(motifs_filtered$motif_alt_id)
+table(motifs_filtered$motif_id)
+motifs_filtered$gene_name <- gsub("(.*)::(.*)","\\1", motifs_filtered$sequence_name)
+
+tp_de <- topTable(fit, coef = 2, number = Inf, p.value = 0.05)
+tp_de$direction <- ifelse(tp_de$logFC > 0, "Up", "Down")
+
+motifs_filtered$isDE <- tp_de$direction[match(motifs_filtered$gene_name, tp_de$Symbol)]
+motifs_filtered$isDE[is.na(motifs_filtered$isDE)] <- "No change"
+motifs_filtered$isInARsig <- ifelse(motifs_filtered$gene_name %in% AR_signature$Symbol, 1,0)
+motifs_filtered$isCCA <- ifelse(motifs_filtered$gene_name %in% CC1_basals$Symbol, 1, 0)
+
+
+# two barplots : 1 showing break down of DE status for all genes, 1 showing for AR signatures only.
+
+
+
+library(ggplot2)
+
+
+theme_Publication <- function(base_size=14, base_family="helvetica") {
+      library(grid)
+      library(ggthemes)
+      (theme_foundation(base_size=base_size, base_family=base_family)
+       + theme(plot.title = element_text(face = "bold",
+                                         size = rel(1.2), hjust = 0.5),
+               text = element_text(),
+               panel.background = element_rect(colour = NA),
+               plot.background = element_rect(colour = NA),
+               panel.border = element_rect(colour = NA),
+               axis.title = element_text(face = "bold",size = rel(1)),
+               axis.title.y = element_text(angle=90,vjust =2),
+               axis.title.x = element_text(vjust = -0.2),
+               axis.text = element_text(), 
+               axis.line = element_line(colour="black"),
+               axis.ticks = element_line(),
+               panel.grid.major = element_line(colour="#f0f0f0"),
+               panel.grid.minor = element_blank(),
+               legend.key = element_rect(colour = NA),
+               legend.position = "bottom",
+               legend.direction = "horizontal",
+               legend.key.size= unit(0.2, "cm"),
+               legend.margin = unit(0, "cm"),
+               legend.title = element_text(face="italic"),
+               plot.margin=unit(c(10,5,5,5),"mm"),
+               strip.background=element_rect(colour="#f0f0f0",fill="#f0f0f0"),
+               strip.text = element_text(face="bold")
+          ))
+      
+}
+
+
+p <- ggplot(subset(motifs_filtered, ! isDE %in% "No change") , aes(x= motif_alt_id , fill=isDE))
+p <- p + geom_bar(position="fill") 
+p <- p + scale_fill_manual(values=c( "#474747", "#9BCD9B", "#FF4040") )
+p <- p + ggtitle("Enrichment of differentially expressed genes for  ZEB1, PPARG, OCT1, AR and GATA1 binding sites") + theme_Publication()
+
+print(p)
+
+
+# not quite the plot that we are after
+nDE <- dim(tp_de)[1]
+bs_tbl <- table(motifs_filtered$motif_id[!motifs_filtered$isDE %in% "No change"])
+ggdat <- cbind(withBindingSite = bs_tbl/nDE, noBindingSite= 1-bs_tbl/nDE)
+rownames(ggdat) <- paste(rownames(ggdat), motifs_filtered$motif_alt_id[match(rownames(ggdat), motifs_filtered$motif_id)], sep="_")
+
+library(reshape2)
+ggdat <- melt(ggdat) 
+
+
+p <- ggplot(ggdat , aes(x= Var1 , y= value, fill=Var2))
+p <- p + geom_col() 
+p <- p + scale_fill_manual(values=c("#9BCD9B","#474747") )
+p <- p + ggtitle("Enrichment of differentially expressed genes for  ZEB1, PPARG, OCT1, AR and GATA1 binding sites") + theme_Publication()
+p <- p + xlab("Transcription factor") + ylab("Proportion of DE genes") + guides(fill=guide_legend(title="Status"))
+p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+print(p)
+
+## AR plot
+nARsig <- dim(AR_signature)[1]
+bs_tbl <- table(motifs_filtered$motif_id[motifs_filtered$isInARsig == 1])
+ggdat <- cbind(withBindingSite = bs_tbl/nARsig, noBindingSite= 1-bs_tbl/nARsig)
+rownames(ggdat) <- paste(rownames(ggdat), motifs_filtered$motif_alt_id[match(rownames(ggdat), motifs_filtered$motif_id)], sep="_")
+ggdat <- melt(ggdat)
+
+p <- ggplot(ggdat , aes(x= Var1 , y= value, fill=Var2))
+p <- p + geom_col() 
+p <- p + scale_fill_manual(values=c("#9BCD9B","#474747") )
+p <- p + ggtitle("Enrichment of AR signature genes for  ZEB1, PPARG, OCT1, AR and GATA1 binding sites") + theme_Publication()
+p <- p + xlab("Transcription factor") + ylab("Proportion of AR signature genes") + guides(fill=guide_legend(title="Status"))
+p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+print(p)
+
+
+library(VennDiagram)
+
+# overlap of targets among DE genes only
+vd <- venn.diagram(list(ZEB1= motifs_filtered$gene_name[motifs_filtered$motif_alt_id %in% "ZEB1" & !motifs_filtered$isDE %in% "No change"],
+                  AR = motifs_filtered$gene_name[motifs_filtered$motif_alt_id %in% "AR" & !motifs_filtered$isDE %in% "No change"],
+                  PPARG = motifs_filtered$gene_name[motifs_filtered$motif_alt_id %in% "PPARG" & !motifs_filtered$isDE %in% "No change"],
+                  GATA1 = motifs_filtered$gene_name[motifs_filtered$motif_id %in% "MA0035.3" & !motifs_filtered$isDE %in% "No change"]),
+             fill = 1:4, alpha = 0.3, filename = NULL, main = "Overlap of motifs found in differentially expressed genes")
+
+
+print(grid.draw(vd))
+
+sum(duplicated(motifs_filtered$gene_name[motifs_filtered$motif_alt_id %in% "ZEB1" & !motifs_filtered$isDE %in% "No change"]))
+sum(duplicated( motifs_filtered$gene_name[motifs_filtered$motif_alt_id %in% "AR" & !motifs_filtered$isDE %in% "No change"]))
+sum(duplicated(motifs_filtered$gene_name[motifs_filtered$motif_alt_id %in% "PPARG" & !motifs_filtered$isDE %in% "No change"]))
+sum(duplicated(motifs_filtered$gene_name[motifs_filtered$motif_id %in% "MA0035.3" & !motifs_filtered$isDE %in% "No change"]))
+
+## -------------
+# CCA plot
+## we have generated a fimo search for CCA genes, load those results:
+### this needs to be re-run as FIMO sequences for CCA are not named
+
+# motifs_CCA <- read.table("MEME/FIMO_CCA/fimo.tsv", header = TRUE)
+# 
+# # before getting to start to worry about the significance of the sites
+# motifs_CCA$adj.P.Val <- p.adjust(motifs_CCA$p.value, method = "fdr")
+# sum(motifs_CCA$q.value < 0.05)
+# sum(motifs_CCA$adj.P.Val < 0.05)
+# motif_tbl_CCA <- tbl_df(motifs_CCA)
+# 
+# motifs_filtered_CCA <- motif_tbl_CCA %>% group_by(motif_id,motif_alt_id,sequence_name) %>% summarise(min(adj.P.Val))
+# motifs_filtered_CCA <- as.data.frame(motifs_filtered_CCA)
+# table(motifs_filtered_CCA$motif_alt_id)
+# table(motifs_filtered_CCA$motif_id)
+# motifs_filtered_CCA$gene_name <- gsub("(.*)::(.*)","\\1", motifs_filtered_CCA$sequence_name)
+# 
+# 
+# 
+# nCC <- dim(CC1_basals)[1]
+# bs_tbl <- table(motifs_filtered$motif_id[motifs_filtered$isCCA == 1])
+# ggdat <- cbind(withBindingSite = bs_tbl/nCC, noBindingSite= 1-bs_tbl/nCC)
+# rownames(ggdat) <- paste(rownames(ggdat), motifs_filtered$motif_alt_id[match(rownames(ggdat), motifs_filtered$motif_id)], sep="_")
+# ggdat <- melt(ggdat)
+# 
+# p <- ggplot(ggdat , aes(x= Var1 , y= value, fill=Var2))
+# p <- p + geom_col() 
+# p <- p + scale_fill_manual(values=c("#9BCD9B","#474747") )
+# p <- p + ggtitle("Enrichment of CCA selected genes for  ZEB1, PPARG, OCT1, AR and GATA1 binding sites") + theme_Publication()
+# p <- p + xlab("Transcription factor") + ylab("Proportion of CCA genes") + guides(fill=guide_legend(title="Status"))
+# p <- p + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+# print(p)
+
+
+@
+
+Enrichment of Lehman 2011 LAR and BL1 signatures in HCC38 samples:
+<<>>=
+LAR_sig <- read.csv("LAR_signature_Lehman2011.csv")
+BL1_sig <- read.csv("BL1_signature_Lehman2011.csv")
+
+
+dim(LAR_sig)
+dim(BL1_sig)
+
+y_hcc38 <- y[,grep("HCC38", colnames(y))]
+y_hcc38$samples$group <- relevel(y_hcc38$samples$group, ref="HCC38_CD44Lo_nonTIC")
+design_hcc38 <- model.matrix(~ group, data=y_hcc38$samples)
+design_hcc38
+
+v <- voom(y_hcc38, design = design_hcc38)
+
+fit <- lmFit(v, design = design_hcc38)
+fit <- eBayes(fit)
+summary(decideTests(fit))
+
+hcc38_cd44hi_all <- topTable(fit, coef = 3, number = Inf, p.value = 1, sort.by = "none")
+
+
+sum(LAR_sig$GENE %in% hcc38_cd44hi_all$Symbol)
+sum(LAR_sig$GENE %in% hcc38_cd44hi_all$Symbol)
+
+
+
+lehman2011_sigs <- list(LAR_LEHMAN = LAR_sig$GENE,
+                        BL1_LEHMAN = BL1_sig$GENE)
+
+
+
+#### barcode plots ---------------
+
+hcc38_cd44hi_all <- topTable(fit, coef = 3, number = Inf, p.value = 1, sort.by = "none")
+idx <- ids2indices(lehman2011_sigs, hcc38_cd44hi_all$Symbol)
+
+
+par(mfrow=c(2,2))
+barcodeplot(hcc38_cd44hi_all$logFC, index = idx[[1]][hcc38_cd44hi_all$logFC[idx[[1]]] > 0],
+            index2 = idx[[1]][hcc38_cd44hi_all$logFC[idx[[1]]] < 0],
+            main = "Enrichment of Lehman LAR signature in HCC38 population \n Direction=Down, PValue= 2.631729e-05",
+            labels = c("Down in HCC38 CD44Hi", "Up in HCC38 CD44Hi"))
+
+barcodeplot(hcc38_cd44hi_all$logFC, index = idx[[2]][hcc38_cd44hi_all$logFC[idx[[2]]] > 0],
+            index2 = idx[[2]][hcc38_cd44hi_all$logFC[idx[[2]]] < 0],
+            main = "Enrichment of Lehman BL1 signature in HCC38 population \n Direction= Down, P-value= 6.389960e-05",
+            labels = c("Down in HCC38 CD44Hi", "Up in HCC38 CD44Hi"))
+
+
+barcodeplot(hcc38_cd44hi_all$adj.P.Val, index = idx[[1]][hcc38_cd44hi_all$adj.P.Val[idx[[1]]] > 0],
+            main = "Enrichment of Lehman LAR signature in HCC38 population",
+            labels = c("more significant","least significant"))
+
+barcodeplot(hcc38_cd44hi_all$adj.P.Val, index = idx[[2]][hcc38_cd44hi_all$adj.P.Val[idx[[2]]] > 0],
+            
+            main = "Enrichment of Lehman BL1 signature in HCC38 population",
+            labels = c("more significant","least significant"))
+
+## testing the significance of signatures ------
+idx <- ids2indices(lehman2011_sigs, v$genes$Symbol)
+camera(v, index = idx, design = design_hcc38)
+mroast(v, index = idx, design = design_hcc38)
+fry(v, index = idx, design = design_hcc38)
+@
+
+
+Need to extract AR concordant/discordant genes
+<<>>=
+CC1_basals[grep("^AR$", CC1_basals$Symbol),]
+
+
+# the aim is to use a mixture model to see what genes AR clusters with
+# AR was found only in HCC38 population, so we perform clustering on 
+# factor loadings for HCC38
+
+library(mclust)
+ 
+
+
+fit_mclust <- Mclust(CC1_HCC38$factor)
+summary(fit_mclust)
+fit_mclust$BIC
+
+length(fit_mclust$classification)
+dim(CC1_HCC38)
+
+fit_mclust$classification[grep("^AR$", CC1_HCC38$Symbol)]
+
+# Genes that cluster with AR based on a 6 component univariate mixture model
+
+AR_sig <- CC1_HCC38[fit_mclust$classification==6,]
+
+head(AR_sig, n = 100)
+
+
+
+# library(sBIC)
+# 
+# set.seed(2018)
+# gMix <- GaussianMixtures(maxNumComponents = 9, phi = 1, dim= 1, restarts = 100)
+# m <- sBIC(CC1_HCC38$factor, gMix)
+# 
+# 
+# #### ------
+# BIC <- mclustBIC(CC1_HCC38$factor)
+# plot(BIC)
+# summary(BIC)
+
+
+# mod1 <- Mclust(t(logCPM), G=2, modelNames = "VVI")
+# summary(mod1)
+# mod1$classification
+# 
+# mod1dr <- MclustDR(mod1)
+# 
+# 
+# 
+# mod5 <- densityMclust(t(logCPM))
+# summary(mod5)
+# plot(mod5, "BIC")
+
+
+################
+# In the above analysis we could show that the AR-related signature has increased expression in the CD44 high state regardless of the state of the cellline. 
+# find what other TFs are there in the genes common to both datasets
+
+
+# TF annotation
+library(biomaRt)
+
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+TF_mapping <-  getBM(attributes = c('entrezgene'), 
+      filters = 'go', 
+      values = 'GO:0003700', 
+      mart = ensembl)
+
+
+
+chromatin_regulator <-  getBM(attributes = c('entrezgene'), 
+      filters = 'go', 
+      values = 'GO:0006325', 
+      mart = ensembl)
+
+CC1_commonToBasals$isTF <- ifelse(CC1_commonToBasals$GeneID %in% TF_mapping$entrezgene, 1, 0)
+CC1_commonToBasals$isChromatinRegulator <- ifelse(CC1_commonToBasals$GeneID %in% chromatin_regulator$entrezgene, 1, 0)
+
+tp_cd44hi <- topTable(fit, coef = 2, number = Inf, p.value = 0.05)
+tp_cd44hi$direction <- ifelse(tp_cd44hi$logFC > 0, "Up", "Down")
+
+CC1_commonToBasals$isDE <- tp_cd44hi$direction[match(CC1_commonToBasals$GeneID, tp_cd44hi$GeneID)]
+CC1_commonToBasals$isDE[is.na(CC1_commonToBasals$isDE)] <- "No change"
+
+
+
+
+
+CC1_commonToBasals[CC1_commonToBasals$isTF==1,]
+CC1_commonToBasals[CC1_commonToBasals$isChromatinRegulator ==1,]
+
+
+## ---- glasso
+
+library(glasso)
+
+dim(CC1_commonToBasals)
+dim(CC1_basals)
+
+
+head(CPM_HCC38)
+head(CPM_HMLER)
+
+
+hcc38_cov <- cov(t(CPM_HCC38[match(CC1_commonToBasals$GeneID, rownames(CPM_HCC38)),]))
+dim(hcc38_cov)
+
+# glasso_hcc38 <- glasso(hcc38_cov, rho=0.02)
+# save(glasso_hcc38, file="glasso_hcc38.RData")
+
+load("glasso_hcc38.RData")
+sum(glasso_hcc38$wi != 0)
+
+dim(CC1_commonToBasals)
+dim(glasso_hcc38$wi)
+
+CC1_commonToBasals[CC1_commonToBasals$isTF==1,][rowSums(glasso_hcc38$wi[CC1_commonToBasals$isTF==1,]) != 0,]
+CC1_commonToBasals[CC1_commonToBasals$isTF==1,]
+
+
+CC1_commonToBasals[glasso_hcc38$wi[match("ZEB1", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hcc38$wi[match("PPARG", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hcc38$wi[match("ZEB2", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hcc38$wi[match("TWIST1", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hcc38$wi[match("GRHL2", CC1_commonToBasals$Symbol),] != 0,]
+
+#### visualise the inverse of the covariance matrix ( the network)  using ggnet2
+
+#devtools::install_github("briatte/ggnet")
+library(ggnet)
+library(network)
+library(sna)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+
+display.brewer.all()
+
+# subset on the TFs and their edges
+net <- glasso_hcc38$wi[CC1_commonToBasals$isTF==1,]
+idx <-  (colSums(net) != 0)
+
+net <- glasso_hcc38$wi[idx,idx]
+
+
+
+
+node_col <- rep("grey75", sum(idx))
+col.lib <- c("#CD3333", "#00B2EE", "#00EEEE", "#FF7F24", "#E9967A", "#FFC125", "#8B6914", "#008B00", "#8B668B", "#CDAF95", "#4876FF", "#8B8B00", "#FFA500")
+
+ 
+names(col.lib) <-  as.character(CC1_commonToBasals[idx, "Symbol"][CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])])
+
+node_col[CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])] <- col.lib
+
+
+
+
+
+
+
+net = network(net, directed = FALSE)
+
+edge_col <- net$iel
+edge_col <- lapply(edge_col, function(x) { rep("grey50",length(x)) })
+names(edge_col) <- CC1_commonToBasals$Symbol[idx]
+
+edge_col[['ZEB1']] <- rep(col.lib['ZEB1'], length(edge_col[['ZEB1']]))
+edge_col[['ZEB2']] <- rep(col.lib['ZEB2'], length(edge_col[['ZEB2']]))
+edge_col[['TWIST1']] <- rep(col.lib['TWIST1'], length(edge_col[['TWIST1']]))
+edge_col[['PPARG']] <- rep(col.lib['PPARG'], length(edge_col[['PPARG']]))
+
+
+ggnet2(net, 
+       label = as.character(CC1_commonToBasals$Symbol[idx]),
+       label.size = 2.5,
+       color = node_col,  size = "degree", size.cut = 10,
+       edge.color = unlist(edge_col)
+       ) + ggtitle("Common CC1 genes \n HCC38 Network") + theme(plot.title = element_text(hjust = 0.5, face='bold'))
+
+
+
+# ZEB1/2 subnetwork
+net <- glasso_hcc38$wi[grep("ZEB|PPARG", CC1_commonToBasals$Symbol),]
+idx <-  (colSums(net) != 0)
+
+net <- glasso_hcc38$wi[idx,idx]
+
+node_col <- rep("grey75", sum(idx))
+col.lib <-  RColorBrewer::brewer.pal( sum(CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])), "Set1")
+names(col.lib) <-  as.character(CC1_commonToBasals[idx, "Symbol"][CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])])
+node_col[CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])] <- col.lib
+
+
+net = network(net, directed = FALSE)
+
+
+edge_col <- net$iel
+edge_col <- lapply(edge_col, function(x) { rep("grey50",length(x)) })
+names(edge_col) <- CC1_commonToBasals$Symbol[idx]
+
+edge_col[['ZEB1']] <- rep(col.lib['ZEB1'], length(edge_col[['ZEB1']]))
+edge_col[['ZEB2']] <- rep(col.lib['ZEB2'], length(edge_col[['ZEB2']]))
+edge_col[['PPARG']] <- rep(col.lib['PPARG'], length(edge_col[['PPARG']]))
+
+
+ggnet2(net, label = as.character(CC1_commonToBasals$Symbol[idx]),
+       label.size = 3, color=node_col,
+       edge.color = unlist(edge_col)
+       ) + ggtitle("PPARG/ZEB1 sub-network \n HCC38 - common CC1 genes") + theme(plot.title = element_text(hjust = 0.5, face='bold'))
+
+@
+
+This is all good, but what is AR doing in HCC38? and how the network is different in HMLER?
+<<>>=
+dim(CC1_HCC38)
+dim(AR_sig)
+
+#confirm ZEB and PPARG are in AR signature?
+AR_sig[grep("ZEB|PPARG", AR_sig$Symbol),] # ok, PPARG not in AR signature
+
+hcc38_AR_cov <- cov(t(CPM_HCC38[match(AR_sig$GeneID, rownames(CPM_HCC38)),]))
+dim(hcc38_AR_cov)
+
+# glasso_hcc38_AR <- glasso(hcc38_AR_cov, rho=0.02)
+# save(glasso_hcc38_AR, file="glasso_hcc38_AR.RData")
+
+AR_sig[glasso_hcc38_AR$wi[match("AR", AR_sig$Symbol),] !=0,]
+
+AR_sig$isTF <- ifelse(AR_sig$GeneID %in% TF_mapping$entrezgene,1,0)
+AR_sig[AR_sig$isTF==1,]
+
+
+net <- glasso_hcc38_AR$wi[AR_sig$isTF==1,]
+idx <-  (colSums(net) != 0)
+
+net <- glasso_hcc38_AR$wi[idx,idx]
+
+
+
+
+node_col <- rep("grey75", sum(idx))
+
+
+# AR network has 27 TF
+col.lib <- colorRampPalette(brewer.pal(9,"Set1"))
+col.lib <- col.lib(sum(AR_sig$isTF[idx] ==1 | grepl("ZEB2", AR_sig$Symbol[idx])))
+names(col.lib) <- as.character(AR_sig$Symbol[idx][AR_sig$isTF[idx] ==1 | grepl("ZEB2", AR_sig$Symbol[idx])])
+
+node_col[AR_sig$isTF[idx] ==1 | grepl("ZEB2", AR_sig$Symbol[idx])] <- col.lib
+  
+
+
+net = network(net, directed = FALSE)
+
+
+edge_col <- net$iel
+edge_col <- lapply(edge_col, function(x) { rep("grey50",length(x)) })
+names(edge_col) <- AR_sig$Symbol[idx]
+
+edge_col[['ZEB1']] <- rep(col.lib['ZEB1'], length(edge_col[['ZEB1']]))
+edge_col[['ZEB2']] <- rep(col.lib['ZEB2'], length(edge_col[['ZEB2']]))
+edge_col[['TWIST1']] <- rep(col.lib['TWIST1'], length(edge_col[['TWIST1']]))
+edge_col[['AR']] <- rep(col.lib['AR'], length(edge_col[['AR']]))
+
+
+
+ggnet2(net, 
+       label = as.character(AR_sig$Symbol[idx]),
+       label.size = 2,
+       color = node_col, size = "degree", size.cut = 10,
+       edge.color = unlist(edge_col)
+       ) + ggtitle("AR Network in HCC38") + theme(plot.title = element_text(hjust = 0.5, face='bold'))
+
+
+## make the network for AR, ZEB1,2 --------------
+net <- glasso_hcc38_AR$wi[grep("ZEB|AR$", AR_sig$Symbol),]
+idx <-  (colSums(net) != 0)
+
+net <- glasso_hcc38_AR$wi[idx,idx]
+
+node_col <- rep("grey75", sum(idx))
+
+
+col.lib <- colorRampPalette(brewer.pal(9,"Set1"))
+col.lib <- col.lib(sum(AR_sig$isTF[idx] ==1 | grepl("ZEB2", AR_sig$Symbol[idx])))
+names(col.lib) <- as.character(AR_sig$Symbol[idx][AR_sig$isTF[idx] ==1 | grepl("ZEB2", AR_sig$Symbol[idx])])
+
+node_col[AR_sig$isTF[idx] ==1 | grepl("ZEB2", AR_sig$Symbol[idx])] <- col.lib
+
+
+
+net = network(net, directed = FALSE)
+
+edge_col <- net$iel
+edge_col <- lapply(edge_col, function(x) { rep("grey50",length(x)) })
+names(edge_col) <- AR_sig$Symbol[idx]
+
+edge_col[['ZEB1']] <- rep(col.lib['ZEB1'], length(edge_col[['ZEB1']]))
+edge_col[['ZEB2']] <- rep(col.lib['ZEB2'], length(edge_col[['ZEB2']]))
+edge_col[['AR']] <- rep(col.lib['AR'], length(edge_col[['AR']]))
+
+
+
+ggnet2(net, label = as.character(AR_sig$Symbol[idx]),
+       label.size = 2.3, color=node_col,
+       size = "degree", size.cut = 10,
+       edge.color = unlist(edge_col)
+       ) + ggtitle("AR/ZEB1 sub-network in HCC38") + theme(plot.title = element_text(hjust = 0.5, face='bold'))
+
+######################################################################## Network in HMLER
+
+hmler_cov <- cov(t(CPM_HMLER[match(CC1_commonToBasals$GeneID, rownames(CPM_HMLER)),]))
+dim(hmler_cov)
+
+# glasso_hmler <- glasso(hmler_cov, rho=0.02)
+# save(glasso_hmler, file="glasso_hmler.RData")
+
+load("glasso_hmler.RData")
+sum(glasso_hmler$wi != 0)
+
+dim(CC1_commonToBasals)
+dim(glasso_hmler$wi)
+
+CC1_commonToBasals[CC1_commonToBasals$isTF==1,][rowSums(glasso_hmler$wi[CC1_commonToBasals$isTF==1,]) != 0,]
+CC1_commonToBasals[CC1_commonToBasals$isTF==1,]
+
+
+CC1_commonToBasals[glasso_hmler$wi[match("ZEB1", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hmler$wi[match("PPARG", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hmler$wi[match("ZEB2", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hmler$wi[match("TWIST1", CC1_commonToBasals$Symbol),] != 0,]
+CC1_commonToBasals[glasso_hmler$wi[match("GRHL2", CC1_commonToBasals$Symbol),] != 0,]
+
+
+
+# subset on the TFs and their edges
+net <- glasso_hmler$wi[CC1_commonToBasals$isTF==1,]
+idx <-  (colSums(net) != 0)
+
+net <- glasso_hmler$wi[idx,idx]
+dimnames(net) <- list(CC1_commonToBasals$Symbol[idx], CC1_commonToBasals$Symbol[idx])
+
+
+
+node_col <- rep("grey75", sum(idx))
+
+
+#col.lib <- RColorBrewer::brewer.pal( sum(CC1_commonToBasals$isTF[idx] ==1| grepl("ZEB2", CC1_commonToBasals$Symbol[idx])), "Spectral")
+ 
+
+# make a custom pallet of 13 colors
+
+col.lib <- c("#CD3333", "#00B2EE", "#00EEEE", "#FF7F24", "#E9967A", "#FFC125", "#8B6914", "#008B00", "#8B668B", "#CDAF95", "#4876FF", "#8B8B00", "#FFA500")
+
+ 
+names(col.lib) <-  as.character(CC1_commonToBasals[idx, "Symbol"][CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])])
+
+node_col[CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])] <- col.lib
+
+
+
+
+
+  # RColorBrewer::brewer.pal( sum(CC1_commonToBasals$isTF[idx] ==1), "Set1")
+  
+#viridis_pal(option = "D")(sum(CC1_commonToBasals$isTF[idx] ==1))  
+
+
+
+
+
+
+
+net = network(net, directed = FALSE)
+
+
+edge_col <- net$iel
+edge_col <- lapply(edge_col, function(x) { rep("grey50",length(x)) })
+names(edge_col) <- CC1_commonToBasals$Symbol[idx]
+
+edge_col[['ZEB1']] <- rep(col.lib['ZEB1'], length(edge_col[['ZEB1']]))
+edge_col[['ZEB2']] <- rep(col.lib['ZEB2'], length(edge_col[['ZEB2']]))
+edge_col[['TWIST1']] <- rep(col.lib['TWIST1'], length(edge_col[['TWIST1']]))
+edge_col[['PPARG']] <- rep(col.lib['PPARG'], length(edge_col[['PPARG']]))
+
+PPARG_idx <- match("PPARG", CC1_commonToBasals$Symbol[idx])
+PPARG_edges <- net$oel[[PPARG_idx]]
+
+sum(PPARG_edges %in% unlist(net$iel))
+
+edge_col <- unlist(edge_col)
+edge_col[which(unlist(net$iel) ==218)] <- col.lib['PPARG']
+
+ggnet2(net, 
+       label = as.character(CC1_commonToBasals$Symbol[idx]),
+       label.size = 2.2,
+       color = node_col,  size = "degree", size.cut = 10,
+       edge.color = edge_col
+       ) + ggtitle("Common CC1 genes \n HMLER Network") + theme(plot.title = element_text(hjust = 0.5, face='bold'))
+
+
+
+
+# ZEB1/2 subnetwork----
+
+net <- glasso_hmler$wi[grep("ZEB|PPARG", CC1_commonToBasals$Symbol),]
+idx <-  (colSums(net) != 0)
+
+net <- glasso_hmler$wi[idx,idx]
+dimnames(net) <- list(CC1_commonToBasals$Symbol[idx], CC1_commonToBasals$Symbol[idx])
+
+node_col <- rep("grey75", sum(idx))
+
+col.lib <-  RColorBrewer::brewer.pal( sum(CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])), "Set1")
+names(col.lib) <-  as.character(CC1_commonToBasals[idx, "Symbol"][CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])])
+
+node_col[CC1_commonToBasals$isTF[idx] ==1 | grepl("ZEB2", CC1_commonToBasals$Symbol[idx])] <- col.lib
+
+
+
+
+
+
+dim(edge_col)
+dim(net)
+length(CC1_commonToBasals$Symbol[idx])
+
+
+
+
+
+
+net = network(net, directed = FALSE)
+
+# the net object produces a list of edges in $oel component
+edge_col <- net$iel
+edge_col <- lapply(edge_col, function(x) { rep("grey50",length(x)) })
+names(edge_col) <- CC1_commonToBasals$Symbol[idx]
+
+edge_col[['ZEB1']] <- rep(col.lib['ZEB1'], length(edge_col[['ZEB1']]))
+edge_col[['ZEB2']] <- rep(col.lib['ZEB2'], length(edge_col[['ZEB2']]))
+edge_col[['PPARG']] <- rep(col.lib['PPARG'], length(edge_col[['PPARG']]))
+
+
+ggnet2(net, label = names(edge_col),
+       label.size = 3, color=node_col,
+       edge.color = unlist(edge_col)
+       ) + ggtitle("PPARG/ZEB1 sub-network \n HMLER - common CC1 genes") + theme(plot.title = element_text(hjust = 0.5, face='bold'))
+
+
+@
+
+
+GO Gene set testing with limma \textit{goana}
+\begin{small}
+<<>>=
+options(width=120)
+#fit_sub <- fit[fit$genes$GeneID %in% CC1_hmler$GeneID,]
+fit_sub <- fit[fit$genes$GeneID %in% AR_sig$GeneID,]
+go <- goana(fit_sub, species = "Hs")
+topGO(go, ontology = "BP", number = 100)
+@
+\end{small}
+
+kegg gene set testing with limma \textit{kegga}
+\begin{small}
+<<>>=
+options(width=120)
+KEGG <- kegga(fit_sub, species = "Hs")
+topKEGG(KEGG, number = 100)
+@
+\end{small}
+
+barcode plot
+<<>>=
+res_tbl_unsorted <- topTable(fit,number = Inf,sort.by = "none")
+
+AR_idx <- match(AR_sig$GeneID, res_tbl_unsorted$GeneID)
+
+
+
+barcodeplot(res_tbl_unsorted$logFC, index = AR_idx[res_tbl_unsorted$logFC[AR_idx] > 0 ] ,
+            index2 = AR_idx[res_tbl_unsorted$logFC[AR_idx] < 0 ], main = "Enrichment of AR-related genes \n CD44Hi vs CD44 lo populations \n based on Multivariate Correlations Analysis",
+            labels = c("Down in CD44Hi", "Up in CD44Hi"))
+
+@
+
+<<eval=FALSE, echo=FALSE>>=
+AR_sig <- cbind(AR_sig, res_tbl_unsorted[match(AR_sig$GeneID, res_tbl_unsorted$GeneID), 17:22])
+
+@
+
+
+<<>>=
+annot_path <- "/stornext/General/data/academic/lab_davis/genomes/RData_files/"
+load(paste0(annot_path,"Hs.c2.all.v6.1.entrez.RData"))
+
+idx <- ids2indices(Hs.c2.all.v6.1.entrez,v$genes$GeneID[match(CC1_hmler$GeneID, v$genes$GeneID)])
+
+
+go_camera <- camera(v[match(CC1_hmler$GeneID, v$genes$GeneID),], index = idx, design = design,
+                    contrast = ncol(design), inter.gene.cor=0.01)
+
+
+head(go_camera, n = 50)
+
+
+
+kegg_pathways <- grep("KEGG", names(idx))
+kegg_idx <- idx[kegg_pathways]
+
+kegg_fry <- fry(v[match(CC1_hmler$GeneID, v$genes$GeneID),], index = kegg_idx, design = design,
+                block= Cellline, correlation=corfit$consensus.correlation,
+                      contrast = ncol(design))
+
+kegg_fry
+
+@
+
+
+Signatures of non-plasticity: CCA between luminal samples
+<<>>=
+CPM_MCF7 <- cpm(y[,grep("MCF7", y$samples$group)],
+                    log=TRUE, prior.count = 2)
+
+CPM_ZR751 <- cpm(y[,grep("ZR75-1", y$samples$group)],
+                    log=TRUE, prior.count = 2)
+
+# peerm.out.luminal <- CCA.permute(x = t(CPM_MCF7),
+#               z = t(CPM_ZR751),
+#                typex = "standard", typez = "standard",
+#                nperms=10, penaltyxs=seq(.02,.7,len=10)
+#               
+# 
+#               )
+# 
+# 
+# print(peerm.out.luminal)
+# plot(peerm.out.luminal)
+# save(peerm.out.luminal, file="peerm.out.luminal.RData")
+
+
+
+load("peerm.out.luminal.RData")
+
+out.luminal <- CCA(
+  x = t(CPM_MCF7),
+  z = t(CPM_ZR751),
+  typex = "standard", typez = "standard", 
+   K=3, 
+  penaltyx= 0.09555556, v=peerm.out.luminal$v.init, penaltyz= 0.1666667
+  
+  )
+                                         
+                                         
+                                         
+str(out.luminal)
+
+
+
+
+sum(out.luminal$u[,1] != 0)
+sum(out.luminal$v[,1] != 0)
+
+
+sum(out.luminal$u[,2] != 0)
+sum(out.luminal$v[,2] != 0)
+
+
+CC1_luminals <-cbind(annot[out.luminal$u[,1] != 0 | out.luminal$v[,1] != 0 ,], 
+                   AveRankBD = rowMeans(cbind(rank(-abs(out.luminal$u[,1]), ties.method = "average"),
+                                            rank(-abs(out.luminal$v[,1]), ties.method = "average")))[out.luminal$u[,1] != 0 | out.luminal$v[,1] != 0],
+                   CBD = (sign(out$u[,1]) * sign(out.luminal$v[,1]))[out.luminal$u[,1] != 0 | out.luminal$v[,1] != 0],
+                   Direction_DB1 = sign(out.luminal$u[,1])[out.luminal$u[,1] != 0 | out.luminal$v[,1] != 0],
+                   Direction_DB2 = sign(out.luminal$v[,1])[out.luminal$u[,1] != 0 | out.luminal$v[,1] != 0])
+
+
+CC1_luminals <- CC1_luminals[order(CC1_luminals$AveRankBD),]
+
+
+@
+
+
+Overlap between the two CCA results -- steps towards divergenec from a TIC phenotype 
+<<<>>=
+CC1_basals[CC1_basals$GeneID %in% CC1_luminals$GeneID,]
+
+temp_basal <- CC1_basals
+colnames(temp_basal) <- paste0(colnames(CC1_basals), "_basals")
+
+temp_luminal <- CC1_luminals
+colnames(temp_luminal) <- paste0(colnames(CC1_luminals), "_luminals")
+
+
+
+
+TICtransitionPreventingGenes <- temp_basal[temp_basal$GeneID_basals %in% temp_luminal$GeneID_luminals,]
+TICtransitionPreventingGenes <- cbind(TICtransitionPreventingGenes, 
+                                      temp_luminal[match(TICtransitionPreventingGenes$GeneID_basals, temp_luminal$GeneID_luminals), -c(1:4)])
+@
+
+
+Heatmap of the selected genes above that are expected to shed light on genes preventing TIC transition
+<<>>=
+CPM <- cpm(y, log=TRUE, prior.count = 2)
+
+col_idx <- c(grep("ZR75|MCF", colnames(CPM)),
+             grep("HMLER_CD44Lo", colnames(CPM)),
+             grep("HCC38_CD44lo", colnames(CPM)),
+             grep("HMLER_CD44Hi", colnames(CPM)),
+             grep("HMLER_104Med", colnames(CPM)),
+             grep("HCC38_CD44Hi", colnames(CPM)),
+             grep("HCC38_104Med", colnames(CPM))
+              )
+
+CPM <- CPM[, col_idx]
+
+coolmap(CPM[match(TICtransitionPreventingGenes$GeneID_basals, rownames(CPM)),],
+        cluster.by = "de pattern", margins = c(8,6), keysize=0.75, cexRow=0.4, linkage.col = "none",
+        labRow = TICtransitionPreventingGenes$Symbol_basals)
+
+
+
+@
+
+<<eval=FALSE>>=
+
+options(java.parameters = "-Xmx8000m")
+library(xlsx)
+write.xlsx(CC1_HMLER, file= "CCA_basal_luminals.xlsx", sheetName="CC1 HMLER", row.names=FALSE)
+write.xlsx(CC1_HCC38, file= "CCA_basal_luminals.xlsx", sheetName="CC1 HCC38", append=TRUE, row.names=FALSE)
+write.xlsx(CC1_basals, file= "CCA_basal_luminals.xlsx", sheetName="CC1 basals", append=TRUE, row.names=FALSE)
+write.xlsx(ZEB1_concordant_CC1, file= "CCA_basal_luminals.xlsx", sheetName="ZEB1 concordant CC1 basals", append=TRUE, row.names=FALSE)
+write.xlsx(ZEB1_discordant_CC1, file= "CCA_basal_luminals.xlsx", sheetName="ZEB1 discordant CC1 basals", append=TRUE, row.names=FALSE)
+write.xlsx(CC1_luminals, file= "CCA_basal_luminals.xlsx", sheetName="CC1 luminals", append=TRUE, row.names=FALSE)
+write.xlsx(TICtransitionPreventingGenes, file= "CCA_basal_luminals.xlsx", sheetName="TIC transition preventing genes", append=TRUE, row.names=FALSE)
+
+# gene set testing
+write.xlsx(topGO(go, ontology = "BP", number = 200), file= "CCA_basal_luminals.xlsx", sheetName="GO - CC1 basal ", append=TRUE, row.names=TRUE)
+write.xlsx(topKEGG(KEGG, number = 200), file= "CCA_basal_luminals.xlsx", sheetName="KEGG - CC1 basal", append=TRUE, row.names= TRUE)
+write.xlsx(go_camera[1:200,], file= "CCA_basal_luminals.xlsx", sheetName="C2 MsigDB - camera", append=TRUE, row.names=TRUE)
+write.xlsx(kegg_fry[1:200,], file= "CCA_basal_luminals.xlsx", sheetName="KEGG MSigDB - camera", append=TRUE, row.names=TRUE)
+
+
+
+
+@
+
+
+\end{document}
